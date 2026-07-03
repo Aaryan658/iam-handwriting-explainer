@@ -29,8 +29,8 @@ print("Model loaded.")
 # ---------------------------------------------------------------------------
 # Discover bundled sample line groups   (samples/<line-group-id>/*.png)
 # ---------------------------------------------------------------------------
-SAMPLES_DIR = os.path.join(os.path.dirname(__file__), "samples")
-LINE_GROUPS: dict[str, list[str]] = {}
+SAMPLES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "samples")
+LINE_GROUPS = {}
 
 for group_dir in sorted(glob.glob(os.path.join(SAMPLES_DIR, "*"))):
     if os.path.isdir(group_dir):
@@ -45,7 +45,7 @@ LINE_GROUP_CHOICES = list(LINE_GROUPS.keys())
 # Core functions
 # ---------------------------------------------------------------------------
 
-def transcribe_single_image(image: Image.Image) -> str:
+def transcribe_single_image(image):
     """Run TrOCR on one PIL image and return the predicted text."""
     pixel_values = processor(image.convert("RGB"), return_tensors="pt").pixel_values
     with torch.no_grad():
@@ -56,28 +56,28 @@ def transcribe_single_image(image: Image.Image) -> str:
 def transcribe_uploaded_image(image):
     """Handle a user-uploaded single word image."""
     if image is None:
-        return "⚠️ Please upload an image first."
+        return "⚠️ Please upload an image first.", ""
     pil_image = Image.fromarray(image) if not isinstance(image, Image.Image) else image
     word = transcribe_single_image(pil_image)
-    return word
+    return word, word
 
 
-def transcribe_line_group(group_id: str):
+def transcribe_line_group(group_id):
     """Reconstruct a sentence from a bundled line group."""
     if not group_id or group_id not in LINE_GROUPS:
-        return "⚠️ Please select a valid line group.", None
+        return "⚠️ Please select a valid line group.", [], ""
     image_paths = LINE_GROUPS[group_id]
     pred_words = []
     gallery_images = []
     for path in image_paths:
         img = Image.open(path).convert("RGB")
-        gallery_images.append((path, os.path.basename(path)))
+        gallery_images.append(path)
         pred_words.append(transcribe_single_image(img))
     sentence = " ".join(pred_words)
-    return sentence, gallery_images
+    return sentence, gallery_images, sentence
 
 
-def explain_with_groq(sentence: str) -> str:
+def explain_with_groq(sentence):
     """Send reconstructed sentence to Groq for correction + explanation."""
     if not sentence or sentence.startswith("⚠️"):
         return "⚠️ Nothing to explain — run Transcribe first."
@@ -117,14 +117,14 @@ def explain_with_groq(sentence: str) -> str:
             model="llama-3.1-8b-instant",
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"OCR output:\n{sentence}"},
+                {"role": "user", "content": "OCR output:\n" + sentence},
             ],
             temperature=0.2,
             max_tokens=300,
         )
         return response.choices[0].message.content
     except Exception as e:
-        return f"⚠️ Groq API error: {e}"
+        return "⚠️ Groq API error: " + str(e)
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +141,6 @@ CUSTOM_CSS = """
     margin: 0 auto !important;
 }
 
-/* Header styling */
 #app-title {
     text-align: center;
     background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -158,7 +157,6 @@ CUSTOM_CSS = """
     margin-top: 0;
 }
 
-/* Tab styling */
 .tab-nav button {
     font-weight: 600 !important;
     font-size: 0.95rem !important;
@@ -168,7 +166,6 @@ CUSTOM_CSS = """
     color: #667eea !important;
 }
 
-/* Primary buttons */
 .primary-btn {
     background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
     border: none !important;
@@ -182,7 +179,6 @@ CUSTOM_CSS = """
     opacity: 0.9 !important;
 }
 
-/* Explain button */
 .explain-btn {
     background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%) !important;
     border: none !important;
@@ -196,17 +192,10 @@ CUSTOM_CSS = """
     opacity: 0.9 !important;
 }
 
-/* Output boxes */
 .output-box textarea {
     font-size: 1rem !important;
     line-height: 1.6 !important;
     border-radius: 8px !important;
-}
-
-/* Gallery */
-.gallery-container {
-    border-radius: 12px !important;
-    overflow: hidden !important;
 }
 """
 
@@ -221,9 +210,6 @@ def build_ui():
             "TrOCR transcribes, Groq explains."
             "</p>"
         )
-
-        # Shared state for the reconstructed sentence
-        sentence_state = gr.State("")
 
         with gr.Tabs():
             # ============================================================
@@ -247,6 +233,10 @@ def build_ui():
                             elem_classes=["output-box"],
                             lines=2,
                         )
+                        # Hidden textbox to hold sentence for Explain button
+                        upload_sentence_hidden = gr.Textbox(
+                            visible=False,
+                        )
                         explain_upload_btn = gr.Button(
                             "Explain with LLM", elem_classes=["explain-btn"]
                         )
@@ -257,18 +247,14 @@ def build_ui():
                             lines=8,
                         )
 
-                def do_upload_transcribe(image):
-                    result = transcribe_uploaded_image(image)
-                    return result, result
-
                 transcribe_upload_btn.click(
-                    fn=do_upload_transcribe,
+                    fn=transcribe_uploaded_image,
                     inputs=[upload_image],
-                    outputs=[upload_result, sentence_state],
+                    outputs=[upload_result, upload_sentence_hidden],
                 )
                 explain_upload_btn.click(
                     fn=explain_with_groq,
-                    inputs=[sentence_state],
+                    inputs=[upload_sentence_hidden],
                     outputs=[upload_explanation],
                 )
 
@@ -290,7 +276,6 @@ def build_ui():
                             label="Word Images",
                             columns=4,
                             height=180,
-                            elem_classes=["gallery-container"],
                         )
                     with gr.Column(scale=1):
                         group_result = gr.Textbox(
@@ -298,6 +283,10 @@ def build_ui():
                             interactive=False,
                             elem_classes=["output-box"],
                             lines=3,
+                        )
+                        # Hidden textbox to hold sentence for Explain button
+                        group_sentence_hidden = gr.Textbox(
+                            visible=False,
                         )
                         explain_group_btn = gr.Button(
                             "Explain with LLM", elem_classes=["explain-btn"]
@@ -309,18 +298,14 @@ def build_ui():
                             lines=8,
                         )
 
-                def do_group_transcribe(group_id):
-                    sentence, gallery = transcribe_line_group(group_id)
-                    return sentence, gallery, sentence
-
                 transcribe_group_btn.click(
-                    fn=do_group_transcribe,
+                    fn=transcribe_line_group,
                     inputs=[group_dropdown],
-                    outputs=[group_result, word_gallery, sentence_state],
+                    outputs=[group_result, word_gallery, group_sentence_hidden],
                 )
                 explain_group_btn.click(
                     fn=explain_with_groq,
-                    inputs=[sentence_state],
+                    inputs=[group_sentence_hidden],
                     outputs=[group_explanation],
                 )
 
