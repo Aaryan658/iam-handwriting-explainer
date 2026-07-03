@@ -1,1 +1,5 @@
 gradio
+transformers
+torch
+pillow
+groq
