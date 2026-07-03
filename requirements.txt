@@ -3,3 +3,4 @@ transformers
 torch
 pillow
 groq
+pydantic==2.10.6
