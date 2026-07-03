@@ -45,6 +45,14 @@ LINE_GROUP_CHOICES = list(LINE_GROUPS.keys())
 # Core functions
 # ---------------------------------------------------------------------------
 
+# Gather some sample images for the Single Word tab examples
+SAMPLE_IMAGES = []
+for images in LINE_GROUPS.values():
+    SAMPLE_IMAGES.extend(images)
+    if len(SAMPLE_IMAGES) >= 8:
+        break
+SAMPLE_IMAGES = SAMPLE_IMAGES[:8]
+
 def transcribe_single_image(image):
     """Run TrOCR on one PIL image and return the predicted text."""
     pixel_values = processor(image.convert("RGB"), return_tensors="pt").pixel_values
@@ -58,6 +66,12 @@ def transcribe_uploaded_image(image):
     if image is None:
         return "⚠️ Please upload an image first.", ""
     pil_image = Image.fromarray(image) if not isinstance(image, Image.Image) else image
+    
+    # Simple aspect-ratio/dimension check to reject likely multi-line images
+    width, height = pil_image.size
+    if height > width * 1.5 or (height > 300 and width < height * 3):
+        return "⚠️ This looks like a multi-line image — try the Line Group tab or a single-word sample instead.", ""
+        
     word = transcribe_single_image(pil_image)
     return word, word
 
@@ -220,11 +234,17 @@ def build_ui():
                     with gr.Column(scale=1):
                         upload_image = gr.Image(
                             label="Upload a handwritten word image",
+                            info="Upload a single cropped word only (not a sentence or paragraph) — try the bundled samples below for best results.",
                             type="pil",
                             height=220,
                         )
                         transcribe_upload_btn = gr.Button(
                             "Transcribe", elem_classes=["primary-btn"]
+                        )
+                        gr.Examples(
+                            examples=SAMPLE_IMAGES,
+                            inputs=upload_image,
+                            label="Bundled Sample Words"
                         )
                     with gr.Column(scale=1):
                         upload_result = gr.Textbox(
