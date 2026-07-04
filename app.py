@@ -221,8 +221,14 @@ def transcribe(image):
     pil_image = Image.fromarray(image) if not isinstance(image, Image.Image) else image
     pil_image = pil_image.convert("RGB")
 
+    # Pad to square to preserve aspect ratio, then resize to 768x768
+    max_dim = max(pil_image.width, pil_image.height)
+    padded = Image.new("RGB", (max_dim, max_dim), (255, 255, 255))
+    padded.paste(pil_image, ((max_dim - pil_image.width) // 2, (max_dim - pil_image.height) // 2))
+    pil_image_sq = padded.resize((768, 768), Image.Resampling.BILINEAR)
+
     prompt = "<OCR>"
-    inputs = processor(text=prompt, images=pil_image, return_tensors="pt")
+    inputs = processor(text=prompt, images=pil_image_sq, return_tensors="pt")
 
     with torch.no_grad():
         generated_ids = model.generate(
@@ -237,7 +243,7 @@ def transcribe(image):
     parsed = processor.post_process_generation(
         generated_text,
         task=prompt,
-        image_size=(pil_image.width, pil_image.height),
+        image_size=(pil_image_sq.width, pil_image_sq.height),
     )
 
     return parsed.get("<OCR>", generated_text).strip()
