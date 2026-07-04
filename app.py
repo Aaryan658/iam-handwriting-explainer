@@ -55,7 +55,7 @@ from transformers import TrOCRProcessor, VisionEncoderDecoderModel, RobertaToken
 print("Loading TrOCR model and processor...")
 # Instantiate RobertaTokenizer manually to bypass TrOCR Processor bugs
 tokenizer = RobertaTokenizer.from_pretrained("microsoft/trocr-base-handwritten")
-processor = TrOCRProcessor.from_pretrained("microsoft/trocr-base-handwritten", tokenizer=tokenizer)
+processor = TrOCRProcessor.from_pretrained("microsoft/trocr-base-handwritten", tokenizer=tokenizer, use_fast=False)
 model = VisionEncoderDecoderModel.from_pretrained("microsoft/trocr-base-handwritten")
 print("TrOCR Model loaded successfully.")
 
