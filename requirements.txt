@@ -3,9 +3,9 @@ transformers
 torch
 pillow
 groq
-datasets
 sentencepiece
 tiktoken
 protobuf
 requests
 pydantic==2.10.6
+safetensors

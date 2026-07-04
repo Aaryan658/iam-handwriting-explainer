@@ -2,15 +2,15 @@ import os
 import glob
 import difflib
 import string
-import gradio as gr
-import torch
-from transformers import TrOCRProcessor, ViTImageProcessor, RobertaTokenizer, VisionEncoderDecoderModel, logging as hf_logging
-from PIL import Image
-from groq import Groq
-import warnings
 import sys
 import subprocess
+import warnings
+
+import gradio as gr
+import torch
 import numpy as np
+from PIL import Image
+from groq import Groq
 
 # --- Hack to force install missing dependencies if HF Spaces caching fails ---
 try:
@@ -38,6 +38,7 @@ except Exception:
 # ---------------------------------------------------------------------------
 # Suppress noisy warnings
 # ---------------------------------------------------------------------------
+from transformers import logging as hf_logging
 hf_logging.set_verbosity_error()
 warnings.filterwarnings("ignore")
 
@@ -47,14 +48,106 @@ warnings.filterwarnings("ignore")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
 # ---------------------------------------------------------------------------
-# Load TrOCR model once at startup
+# Florence-2 model loading with runtime compatibility patches
 # ---------------------------------------------------------------------------
-print("Loading TrOCR processor and model …")
-image_processor = ViTImageProcessor.from_pretrained("microsoft/trocr-base-handwritten")
-tokenizer = RobertaTokenizer.from_pretrained("microsoft/trocr-base-handwritten")
-processor = TrOCRProcessor(image_processor=image_processor, tokenizer=tokenizer)
-model = VisionEncoderDecoderModel.from_pretrained("microsoft/trocr-base-handwritten")
-print("Model loaded.")
+# The Florence-2 remote code is incompatible with transformers v5+.
+# We apply three monkey-patches:
+#   1. PretrainedConfig.forced_bos_token_id — missing attribute
+#   2. _supports_sdpa — property not defined on custom pretrained model
+#   3. prepare_inputs_for_generation — EncoderDecoderCache not subscriptable
+# After loading, we manually tie the shared embedding weights because the
+# weight-tying mechanism doesn't fire correctly with the custom code.
+# ---------------------------------------------------------------------------
+
+from transformers import PretrainedConfig, PreTrainedModel
+from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+
+# Patch 1: forced_bos_token_id
+PretrainedConfig.forced_bos_token_id = None
+
+# Patch 2: _supports_sdpa (class-level default; overridden per-module below)
+PreTrainedModel._supports_sdpa = False
+
+# Patch 3: additional_special_tokens property
+if not hasattr(PreTrainedTokenizerBase, "additional_special_tokens"):
+    @property
+    def additional_special_tokens(self):
+        return self.special_tokens_map.get("additional_special_tokens", [])
+    PreTrainedTokenizerBase.additional_special_tokens = additional_special_tokens
+
+from transformers.dynamic_module_utils import get_class_from_dynamic_module
+from transformers import AutoProcessor, AutoModelForCausalLM
+
+FLORENCE_MODEL_ID = "microsoft/Florence-2-base"
+
+print("Loading Florence-2 processor ...")
+processor = AutoProcessor.from_pretrained(FLORENCE_MODEL_ID, trust_remote_code=True)
+
+# Compile the dynamic module (downloads + imports classes) without instantiating
+print("Compiling Florence-2 dynamic module ...")
+get_class_from_dynamic_module(
+    "modeling_florence2.Florence2ForConditionalGeneration", FLORENCE_MODEL_ID
+)
+
+# Patch the compiled classes in sys.modules *before* the first from_pretrained
+for _mod_name in list(sys.modules.keys()):
+    if "modeling_florence2" not in _mod_name:
+        continue
+    _mod = sys.modules[_mod_name]
+
+    # Patch _supports_sdpa as a property that delegates to the inner language_model
+    if hasattr(_mod, "Florence2PreTrainedModel"):
+        _cls = getattr(_mod, "Florence2PreTrainedModel")
+
+        @property
+        def _patched_supports_sdpa(self):
+            if not hasattr(self, "language_model"):
+                return False
+            return getattr(self.language_model, "_supports_sdpa", False)
+
+        _cls._supports_sdpa = _patched_supports_sdpa
+
+    # Patch prepare_inputs_for_generation to convert EncoderDecoderCache → legacy
+    if hasattr(_mod, "Florence2LanguageForConditionalGeneration"):
+        _cls = getattr(_mod, "Florence2LanguageForConditionalGeneration")
+        _original_prepare = _cls.prepare_inputs_for_generation
+
+        def _patched_prepare(self, input_ids, past_key_values=None, **kwargs):
+            if past_key_values is not None:
+                if past_key_values.__class__.__name__ == "EncoderDecoderCache":
+                    if past_key_values.get_seq_length() == 0:
+                        past_key_values = None
+                    else:
+                        sa = tuple(
+                            (layer.keys, layer.values)
+                            for layer in past_key_values.self_attention_cache.layers
+                        )
+                        ca = tuple(
+                            (layer.keys, layer.values)
+                            for layer in past_key_values.cross_attention_cache.layers
+                        )
+                        past_key_values = tuple(
+                            (s[0], s[1], c[0], c[1]) for s, c in zip(sa, ca)
+                        )
+            return _original_prepare(
+                self, input_ids, past_key_values=past_key_values, **kwargs
+            )
+
+        _cls.prepare_inputs_for_generation = _patched_prepare
+
+# First (and only) model instantiation
+print("Loading Florence-2 model weights ...")
+model = AutoModelForCausalLM.from_pretrained(
+    FLORENCE_MODEL_ID, trust_remote_code=True, torch_dtype=torch.float32
+)
+
+# Fix weight tying: the checkpoint stores `language_model.model.shared.weight`
+# but embed_tokens and lm_head are randomly initialised by the loader.
+shared_w = model.language_model.model.shared.weight
+model.language_model.model.encoder.embed_tokens.weight = shared_w
+model.language_model.model.decoder.embed_tokens.weight = shared_w
+model.language_model.lm_head.weight = shared_w
+print("Florence-2 model loaded - weights tied OK")
 
 # ---------------------------------------------------------------------------
 # Discover bundled sample line images  (samples/line_*.png)
@@ -120,77 +213,37 @@ def tokenize(text):
 # Core functions
 # ---------------------------------------------------------------------------
 
-def segment_lines(pil_image):
-    """Segment a paragraph/multi-line image into individual line images using horizontal projection profiling."""
-    gray = pil_image.convert("L")
-    arr = np.array(gray)
-    
-    # Dynamically handle light vs dark background
-    if np.mean(arr) > 127:
-        processed = 255.0 - arr
-    else:
-        processed = arr.astype(float)
-        
-    row_means = np.mean(processed, axis=1)
-    p_min = np.min(row_means)
-    p_max = np.max(row_means)
-    
-    # If range is very small, it's likely a blank/solid image
-    if p_max - p_min < 1.0:
-        return [pil_image]
-        
-    threshold = p_min + 0.05 * (p_max - p_min)
-    is_text = row_means > threshold
-    
-    lines = []
-    in_line = False
-    start_row = 0
-    
-    for r in range(len(is_text)):
-        if is_text[r] and not in_line:
-            in_line = True
-            start_row = r
-        elif (not is_text[r] or r == len(is_text) - 1) and in_line:
-            in_line = False
-            end_row = r
-            if end_row - start_row > 15:
-                # Add padding to avoid cropping ascenders/descenders too tightly
-                pad = 4
-                padded_start = max(0, start_row - pad)
-                padded_end = min(pil_image.height, end_row + pad)
-                line_crop = pil_image.crop((0, padded_start, pil_image.width, padded_end))
-                lines.append(line_crop)
-                
-    return lines
-
-
 def transcribe(image):
-    """Run TrOCR on one PIL image (segments first if multi-line) and return the raw transcription."""
+    """Run Florence-2 OCR on one PIL image and return the raw transcription."""
     if image is None:
         return "⚠️ Please select or upload an image first."
 
     pil_image = Image.fromarray(image) if not isinstance(image, Image.Image) else image
     pil_image = pil_image.convert("RGB")
 
-    lines = segment_lines(pil_image)
+    # Florence-2 expects square inputs — resize to 768×768
+    pil_image_sq = pil_image.resize((768, 768), Image.Resampling.BILINEAR)
 
-    if len(lines) <= 1:
-        pixel_values = processor(pil_image, return_tensors="pt").pixel_values
-        with torch.no_grad():
-            generated_ids = model.generate(pixel_values, max_new_tokens=64)
-        return processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+    prompt = "<OCR>"
+    inputs = processor(text=prompt, images=pil_image_sq, return_tensors="pt")
 
-    # Process each segmented line
-    transcriptions = []
-    for line_img in lines:
-        pixel_values = processor(line_img, return_tensors="pt").pixel_values
-        with torch.no_grad():
-            generated_ids = model.generate(pixel_values, max_new_tokens=64)
-        txt = processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
-        if txt:
-            transcriptions.append(txt)
+    with torch.no_grad():
+        generated_ids = model.generate(
+            input_ids=inputs["input_ids"],
+            pixel_values=inputs["pixel_values"],
+            max_new_tokens=1024,
+            do_sample=False,
+            num_beams=3,
+        )
 
-    return " ".join(transcriptions)
+    generated_text = processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
+    parsed = processor.post_process_generation(
+        generated_text,
+        task=prompt,
+        image_size=(pil_image_sq.width, pil_image_sq.height),
+    )
+
+    return parsed.get("<OCR>", generated_text).strip()
 
 
 def transcribe_and_clear(image):
@@ -359,7 +412,7 @@ def build_ui():
         gr.Markdown(
             "<p id='app-subtitle'>"
             "Click a sample handwritten line below or upload your own — "
-            "TrOCR transcribes, Groq explains."
+            "Florence-2 transcribes, Groq explains."
             "</p>"
         )
 
@@ -395,7 +448,7 @@ def build_ui():
                         )
                     with gr.Column(scale=1):
                         sample_transcription = gr.Textbox(
-                            label="Raw Transcription (TrOCR)",
+                            label="Raw Transcription (Florence-2)",
                             interactive=False,
                             elem_classes=["output-box"],
                             lines=2,
@@ -441,19 +494,19 @@ def build_ui():
                 with gr.Row():
                     with gr.Column(scale=1):
                         upload_image = gr.Image(
-                            label="Upload a handwritten line image",
+                            label="Upload a handwritten image",
                             type="pil",
                             height=180,
                         )
                         gr.Markdown(
                             "<p class='upload-caption'>"
-                            "For best results, upload a single handwritten line "
-                            "(not a full page or paragraph)."
+                            "Florence-2 handles single lines and paragraphs — "
+                            "no manual segmentation needed."
                             "</p>"
                         )
                     with gr.Column(scale=1):
                         upload_transcription = gr.Textbox(
-                            label="Raw Transcription (TrOCR)",
+                            label="Raw Transcription (Florence-2)",
                             interactive=False,
                             elem_classes=["output-box"],
                             lines=2,
@@ -496,7 +549,7 @@ def build_ui():
         gr.Markdown(
             "<div style='text-align:center; color:#9ca3af; font-size:0.8rem; "
             "margin-top:1.5rem;'>"
-            "Powered by TrOCR · Groq (Llama 3.1) · Gradio  ·  "
+            "Powered by Florence-2 · Groq (Llama 3.3) · Gradio  ·  "
             "Samples from <a href='https://huggingface.co/datasets/Teklia/IAM-line' "
             "style='color:#667eea;'>Teklia/IAM-line</a>"
             "</div>"
