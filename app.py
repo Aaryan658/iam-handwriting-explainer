@@ -1,5 +1,7 @@
 import os
 import glob
+import difflib
+import string
 import gradio as gr
 import torch
 from transformers import AutoProcessor, VisionEncoderDecoderModel, logging as hf_logging
@@ -27,73 +29,86 @@ model = VisionEncoderDecoderModel.from_pretrained("microsoft/trocr-base-handwrit
 print("Model loaded.")
 
 # ---------------------------------------------------------------------------
-# Discover bundled sample line groups   (samples/<line-group-id>/*.png)
+# Discover bundled sample line images  (samples/line_*.png)
 # ---------------------------------------------------------------------------
 SAMPLES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "samples")
-LINE_GROUPS = {}
+SAMPLE_IMAGES = sorted(glob.glob(os.path.join(SAMPLES_DIR, "line_*.png")))
 
-for group_dir in sorted(glob.glob(os.path.join(SAMPLES_DIR, "*"))):
-    if os.path.isdir(group_dir):
-        group_id = os.path.basename(group_dir)
-        images = sorted(glob.glob(os.path.join(group_dir, "*.png")))
-        if images:
-            LINE_GROUPS[group_id] = images
 
-LINE_GROUP_CHOICES = list(LINE_GROUPS.keys())
+# ---------------------------------------------------------------------------
+# Groq system prompt  (matches validated Colab notebook)
+# ---------------------------------------------------------------------------
+SYSTEM_PROMPT = (
+    "You are an AI assistant correcting OCR output from handwriting recognition.\n"
+    "For each sentence you receive, respond with EXACTLY this format:\n\n"
+    "Added content: <YES | NO>\n"
+    "Corrected: <your best corrected transcription>\n"
+    "Confidence: <HIGH | MEDIUM | LOW>\n"
+    "Note: <any notes, or omit this line if confidence is HIGH>\n"
+    "Context: <1-2 sentence explanation, ONLY if confidence is HIGH>\n\n"
+    "Rules:\n"
+    "1. Fix obvious OCR/transcription errors (misspellings, garbled tokens) "
+    "while preserving the original meaning.\n"
+    "2. Before assigning confidence, first answer: \"Did I add, infer, or invent "
+    "any word, phrase, or meaning not directly present in the OCR input — "
+    "including completing a sentence fragment, or substituting a different "
+    "word/phrasing than what was written even if grammatically similar?\" "
+    "Output this as \"Added content: YES\" or \"Added content: NO\" as the "
+    "FIRST line of your response, before anything else.\n"
+    "3. If Added content = YES, Confidence MUST be MEDIUM or LOW. It cannot "
+    "be HIGH under any circumstance.\n"
+    "4. If Added content = NO, Confidence MAY be HIGH.\n"
+    "5. Confidence label definitions:\n"
+    "   - HIGH: the corrected sentence clearly reflects the intended meaning, "
+    "and no words/phrases were added, inferred, or substituted beyond fixing "
+    "character-level noise (spacing, capitalization, punctuation).\n"
+    "   - MEDIUM: some words are uncertain, or minor inference was needed, "
+    "but the gist is likely correct.\n"
+    "   - LOW: more than 2 words were substantially altered, or the corrected "
+    "sentence's meaning is a guess rather than a clear fix.\n"
+    "6. If confidence is MEDIUM or LOW, you MUST include the note: "
+    "\"This reconstruction may not reflect the original meaning.\" "
+    "Do NOT provide a contextual explanation paragraph in that case.\n"
+    "7. Do NOT invent specific details (times, named actions, first-person "
+    "narrative, verbs, or events) that are not clearly present in the input tokens.\n"
+    "8. Do not rephrase or substitute words that are already correct and clear "
+    "— only fix genuine OCR noise. Preserve original word choice "
+    "(\"put down\" must stay \"put down,\" not become \"put forward\").\n"
+    "9. Do not output any additional chat or conversational text."
+)
+
+
+# ---------------------------------------------------------------------------
+# Helper: tokenize for comparison
+# ---------------------------------------------------------------------------
+def tokenize(text):
+    """Lowercase, strip punctuation, split on whitespace."""
+    text = text.lower()
+    text = text.translate(str.maketrans("", "", string.punctuation))
+    return text.split()
+
 
 # ---------------------------------------------------------------------------
 # Core functions
 # ---------------------------------------------------------------------------
 
-# Gather some sample images for the Single Word tab examples
-SAMPLE_IMAGES = []
-for images in LINE_GROUPS.values():
-    SAMPLE_IMAGES.extend(images)
-    if len(SAMPLE_IMAGES) >= 8:
-        break
-SAMPLE_IMAGES = SAMPLE_IMAGES[:8]
+def transcribe(image):
+    """Run TrOCR on one PIL image and return the raw transcription."""
+    if image is None:
+        return "⚠️ Please select or upload an image first."
 
-def transcribe_single_image(image):
-    """Run TrOCR on one PIL image and return the predicted text."""
-    pixel_values = processor(image.convert("RGB"), return_tensors="pt").pixel_values
+    pil_image = Image.fromarray(image) if not isinstance(image, Image.Image) else image
+    pil_image = pil_image.convert("RGB")
+
+    pixel_values = processor(pil_image, return_tensors="pt").pixel_values
     with torch.no_grad():
-        generated_ids = model.generate(pixel_values, max_new_tokens=21)
+        generated_ids = model.generate(pixel_values, max_new_tokens=64)
     return processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
 
 
-def transcribe_uploaded_image(image):
-    """Handle a user-uploaded single word image."""
-    if image is None:
-        return "⚠️ Please upload an image first.", ""
-    pil_image = Image.fromarray(image) if not isinstance(image, Image.Image) else image
-    
-    # Simple aspect-ratio/dimension check to reject likely multi-line images
-    width, height = pil_image.size
-    if height > width * 1.5 or (height > 300 and width < height * 3):
-        return "⚠️ This looks like a multi-line image — try the Line Group tab or a single-word sample instead.", ""
-        
-    word = transcribe_single_image(pil_image)
-    return word, word
-
-
-def transcribe_line_group(group_id):
-    """Reconstruct a sentence from a bundled line group."""
-    if not group_id or group_id not in LINE_GROUPS:
-        return "⚠️ Please select a valid line group.", [], ""
-    image_paths = LINE_GROUPS[group_id]
-    pred_words = []
-    gallery_images = []
-    for path in image_paths:
-        img = Image.open(path).convert("RGB")
-        gallery_images.append(path)
-        pred_words.append(transcribe_single_image(img))
-    sentence = " ".join(pred_words)
-    return sentence, gallery_images, sentence
-
-
-def explain_with_groq(sentence):
-    """Send reconstructed sentence to Groq for correction + explanation."""
-    if not sentence or sentence.startswith("⚠️"):
+def explain(ocr_text):
+    """Send transcription to Groq, run token-overlap check, return formatted output."""
+    if not ocr_text or ocr_text.startswith("⚠️"):
         return "⚠️ Nothing to explain — run Transcribe first."
     if not GROQ_API_KEY:
         return (
@@ -103,46 +118,79 @@ def explain_with_groq(sentence):
 
     client = Groq(api_key=GROQ_API_KEY)
 
-    system_prompt = (
-        "You are an AI assistant correcting OCR output from handwriting recognition. "
-        "For each sentence you receive, respond with EXACTLY this format:\n\n"
-        "Corrected: <your best corrected transcription>\n"
-        "Confidence: <HIGH | MEDIUM | LOW>\n"
-        "Note: <any notes, or omit this line if confidence is HIGH>\n"
-        "Context: <1-2 sentence explanation, ONLY if confidence is HIGH>\n\n"
-        "Rules:\n"
-        "1. Fix obvious OCR/transcription errors (misspellings, garbled tokens) "
-        "while preserving the original meaning.\n"
-        "2. Assign a confidence label for the correction as a whole:\n"
-        "   - HIGH: the corrected sentence clearly reflects the intended meaning.\n"
-        "   - MEDIUM: some words are uncertain but the gist is likely correct.\n"
-        "   - LOW: more than 2 words were substantially altered, or the corrected "
-        "sentence's meaning is a guess rather than a clear fix.\n"
-        "3. If confidence is MEDIUM or LOW, you MUST include the note: "
-        "'This reconstruction may not reflect the original meaning.' "
-        "Do NOT provide a contextual explanation paragraph in that case.\n"
-        "4. Do NOT invent specific details (times, named actions, first-person narrative) "
-        "that are not clearly present in the input tokens.\n"
-        "5. Do not output any additional chat or conversational text."
-    )
-
     try:
         response = client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": "OCR output:\n" + sentence},
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": f"OCR output:\n{ocr_text}"},
             ],
             temperature=0.2,
             max_tokens=300,
         )
-        return response.choices[0].message.content
+        llm_output = response.choices[0].message.content
     except Exception as e:
-        return "⚠️ Groq API error: " + str(e)
+        return f"⚠️ Groq API error: {e}"
+
+    # --- Parse structured fields from LLM response ---
+    lines = llm_output.strip().split("\n")
+    added_content = "UNKNOWN"
+    corrected_line = ""
+    confidence = ""
+
+    for line in lines:
+        if line.startswith("Added content:"):
+            added_content = line.split(":", 1)[1].strip()
+        elif line.startswith("Corrected:"):
+            corrected_line = line.split(":", 1)[1].strip()
+        elif line.startswith("Confidence:"):
+            confidence = line.split(":", 1)[1].strip()
+
+    # --- Deterministic token-overlap check ---
+    ocr_tokens = tokenize(ocr_text)
+    corrected_tokens = tokenize(corrected_line)
+
+    unmatched_tokens = []
+    for ct in corrected_tokens:
+        matches = difflib.get_close_matches(ct, ocr_tokens, n=1, cutoff=0.7)
+        if not matches:
+            unmatched_tokens.append(ct)
+
+    overridden = False
+    if len(unmatched_tokens) > 0 and "HIGH" in confidence:
+        # Override: downgrade to MEDIUM, strip Context, force disclaimer
+        new_lines = []
+        for line in lines:
+            if line.startswith("Confidence:"):
+                new_lines.append("Confidence: MEDIUM")
+            elif line.startswith("Note:") or line.startswith("Context:"):
+                continue
+            else:
+                new_lines.append(line)
+        # Clean trailing blanks
+        while new_lines and not new_lines[-1].strip():
+            new_lines.pop()
+        new_lines.append(
+            "Note: This reconstruction may not reflect the original meaning."
+        )
+        llm_output = "\n".join(new_lines)
+        overridden = True
+
+    # --- Build display output ---
+    display_parts = [llm_output]
+
+    display_parts.append("")
+    display_parts.append("─── Token-Overlap Check ───")
+    display_parts.append(f"Model claimed Added content: {added_content}")
+    display_parts.append(f"Unmatched tokens (code):     {unmatched_tokens if unmatched_tokens else '[] (none)'}")
+    if overridden:
+        display_parts.append("⚠️  Confidence OVERRIDDEN from HIGH → MEDIUM by token check.")
+
+    return "\n".join(display_parts)
 
 
 # ---------------------------------------------------------------------------
-# Gradio UI
+# Gradio UI  —  Blocks layout
 # ---------------------------------------------------------------------------
 
 CUSTOM_CSS = """
@@ -169,15 +217,6 @@ CUSTOM_CSS = """
     color: #6b7280;
     font-size: 0.95rem;
     margin-top: 0;
-}
-
-.tab-nav button {
-    font-weight: 600 !important;
-    font-size: 0.95rem !important;
-}
-.tab-nav button.selected {
-    border-color: #667eea !important;
-    color: #667eea !important;
 }
 
 .primary-btn {
@@ -211,6 +250,13 @@ CUSTOM_CSS = """
     line-height: 1.6 !important;
     border-radius: 8px !important;
 }
+
+.upload-caption {
+    color: #6b7280;
+    font-size: 0.85rem;
+    font-style: italic;
+    margin-top: 4px;
+}
 """
 
 
@@ -220,120 +266,116 @@ def build_ui():
         gr.Markdown("<h1 id='app-title'>✍️ IAM Handwriting Explainer</h1>")
         gr.Markdown(
             "<p id='app-subtitle'>"
-            "Upload a handwritten word image or pick a bundled IAM line group — "
+            "Click a sample handwritten line below or upload your own — "
             "TrOCR transcribes, Groq explains."
             "</p>"
         )
 
         with gr.Tabs():
-            # ============================================================
-            # Tab 1 — Single Word Upload
-            # ============================================================
-            with gr.Tab("🖼️ Single Word"):
+            # ==============================================================
+            # Tab 1 — Sample Lines  (primary demo path)
+            # ==============================================================
+            with gr.Tab("📋 Sample Lines"):
                 with gr.Row():
                     with gr.Column(scale=1):
-                        upload_image = gr.Image(
-                            label="Upload a handwritten word image",
-                            info="Upload a single cropped word only (not a sentence or paragraph) — try the bundled samples below for best results.",
+                        sample_image = gr.Image(
+                            label="Line Image",
                             type="pil",
-                            height=220,
-                        )
-                        transcribe_upload_btn = gr.Button(
-                            "Transcribe", elem_classes=["primary-btn"]
+                            height=180,
                         )
                         gr.Examples(
                             examples=SAMPLE_IMAGES,
-                            inputs=upload_image,
-                            label="Bundled Sample Words"
+                            inputs=sample_image,
+                            label="Bundled IAM Line Samples (click one)",
                         )
                     with gr.Column(scale=1):
-                        upload_result = gr.Textbox(
-                            label="Transcribed Word",
+                        sample_transcription = gr.Textbox(
+                            label="Raw Transcription (TrOCR)",
                             interactive=False,
                             elem_classes=["output-box"],
                             lines=2,
                         )
-                        # Hidden textbox to hold sentence for Explain button
-                        upload_sentence_hidden = gr.Textbox(
-                            visible=False,
-                        )
-                        explain_upload_btn = gr.Button(
-                            "Explain with LLM", elem_classes=["explain-btn"]
-                        )
-                        upload_explanation = gr.Textbox(
-                            label="LLM Explanation",
+                        with gr.Row():
+                            sample_transcribe_btn = gr.Button(
+                                "Transcribe", elem_classes=["primary-btn"]
+                            )
+                            sample_explain_btn = gr.Button(
+                                "Explain", elem_classes=["explain-btn"]
+                            )
+                        sample_explanation = gr.Textbox(
+                            label="LLM Correction + Confidence",
                             interactive=False,
                             elem_classes=["output-box"],
-                            lines=8,
+                            lines=10,
                         )
 
-                transcribe_upload_btn.click(
-                    fn=transcribe_uploaded_image,
-                    inputs=[upload_image],
-                    outputs=[upload_result, upload_sentence_hidden],
+                sample_transcribe_btn.click(
+                    fn=transcribe,
+                    inputs=[sample_image],
+                    outputs=[sample_transcription],
                 )
-                explain_upload_btn.click(
-                    fn=explain_with_groq,
-                    inputs=[upload_sentence_hidden],
-                    outputs=[upload_explanation],
+                sample_explain_btn.click(
+                    fn=explain,
+                    inputs=[sample_transcription],
+                    outputs=[sample_explanation],
                 )
 
-            # ============================================================
-            # Tab 2 — Line Group Reconstruction
-            # ============================================================
-            with gr.Tab("📝 Line Group"):
+            # ==============================================================
+            # Tab 2 — Upload  (optional path)
+            # ==============================================================
+            with gr.Tab("📤 Upload"):
                 with gr.Row():
                     with gr.Column(scale=1):
-                        group_dropdown = gr.Dropdown(
-                            choices=LINE_GROUP_CHOICES,
-                            label="Select a line group",
-                            value=LINE_GROUP_CHOICES[0] if LINE_GROUP_CHOICES else None,
-                        )
-                        transcribe_group_btn = gr.Button(
-                            "Transcribe Line Group", elem_classes=["primary-btn"]
-                        )
-                        word_gallery = gr.Gallery(
-                            label="Word Images",
-                            columns=4,
+                        upload_image = gr.Image(
+                            label="Upload a handwritten line image",
+                            type="pil",
                             height=180,
                         )
+                        gr.Markdown(
+                            "<p class='upload-caption'>"
+                            "For best results, upload a single handwritten line "
+                            "(not a full page or paragraph)."
+                            "</p>"
+                        )
                     with gr.Column(scale=1):
-                        group_result = gr.Textbox(
-                            label="Reconstructed Sentence",
+                        upload_transcription = gr.Textbox(
+                            label="Raw Transcription (TrOCR)",
                             interactive=False,
                             elem_classes=["output-box"],
-                            lines=3,
+                            lines=2,
                         )
-                        # Hidden textbox to hold sentence for Explain button
-                        group_sentence_hidden = gr.Textbox(
-                            visible=False,
-                        )
-                        explain_group_btn = gr.Button(
-                            "Explain with LLM", elem_classes=["explain-btn"]
-                        )
-                        group_explanation = gr.Textbox(
-                            label="LLM Explanation",
+                        with gr.Row():
+                            upload_transcribe_btn = gr.Button(
+                                "Transcribe", elem_classes=["primary-btn"]
+                            )
+                            upload_explain_btn = gr.Button(
+                                "Explain", elem_classes=["explain-btn"]
+                            )
+                        upload_explanation = gr.Textbox(
+                            label="LLM Correction + Confidence",
                             interactive=False,
                             elem_classes=["output-box"],
-                            lines=8,
+                            lines=10,
                         )
 
-                transcribe_group_btn.click(
-                    fn=transcribe_line_group,
-                    inputs=[group_dropdown],
-                    outputs=[group_result, word_gallery, group_sentence_hidden],
+                upload_transcribe_btn.click(
+                    fn=transcribe,
+                    inputs=[upload_image],
+                    outputs=[upload_transcription],
                 )
-                explain_group_btn.click(
-                    fn=explain_with_groq,
-                    inputs=[group_sentence_hidden],
-                    outputs=[group_explanation],
+                upload_explain_btn.click(
+                    fn=explain,
+                    inputs=[upload_transcription],
+                    outputs=[upload_explanation],
                 )
 
         # ---- Footer ----
         gr.Markdown(
             "<div style='text-align:center; color:#9ca3af; font-size:0.8rem; "
             "margin-top:1.5rem;'>"
-            "Powered by TrOCR · Groq (Llama 3.1) · Gradio"
+            "Powered by TrOCR · Groq (Llama 3.1) · Gradio  ·  "
+            "Samples from <a href='https://huggingface.co/datasets/Teklia/IAM-line' "
+            "style='color:#667eea;'>Teklia/IAM-line</a>"
             "</div>"
         )
 
