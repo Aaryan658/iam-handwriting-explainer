@@ -75,37 +75,23 @@ SYSTEM_PROMPT = (
     "For each sentence you receive, respond with EXACTLY this format:\n\n"
     "Added content: <YES | NO>\n"
     "Corrected: <your best corrected transcription>\n"
+    "Uncertain words: <comma-separated list of specific words in the Corrected text that are low-confidence guesses, or \"none\">\n"
+    "Alternatives: <word>: <alt1>, <alt2> (ONLY if Uncertain words is not \"none\", one line per uncertain word)\n"
     "Confidence: <HIGH | MEDIUM | LOW>\n"
     "Note: <any notes, or omit this line if confidence is HIGH>\n"
-    "Context: <1-2 sentence explanation, ONLY if confidence is HIGH>\n\n"
+    "Context: <1-2 sentence explanation, ONLY if confidence is HIGH — must reference specific period/historical/linguistic detail if present (e.g. archaic terms, 1950s British political titles), not a generic paraphrase>\n\n"
     "Rules:\n"
-    "1. Fix obvious OCR/transcription errors (misspellings, garbled tokens) "
-    "while preserving the original meaning.\n"
-    "2. Before assigning confidence, first answer: \"Did I add, infer, or invent "
-    "any word, phrase, or meaning not directly present in the OCR input — "
-    "including completing a sentence fragment, or substituting a different "
-    "word/phrasing than what was written even if grammatically similar?\" "
-    "Output this as \"Added content: YES\" or \"Added content: NO\" as the "
-    "FIRST line of your response, before anything else.\n"
-    "3. If Added content = YES, Confidence MUST be MEDIUM or LOW. It cannot "
-    "be HIGH under any circumstance.\n"
+    "1. Fix obvious OCR/transcription errors (misspellings, garbled tokens) while preserving the original meaning.\n"
+    "2. Before assigning confidence, first answer: \"Did I add, infer, or invent any word, phrase, or meaning not directly present in the OCR input — including completing a sentence fragment, or substituting a different word/phrasing than what was written even if grammatically similar?\" Output this as \"Added content: YES\" or \"Added content: NO\" as the FIRST line of your response, before anything else.\n"
+    "3. If Added content = YES, Confidence MUST be MEDIUM or LOW. It cannot be HIGH under any circumstance.\n"
     "4. If Added content = NO, Confidence MAY be HIGH.\n"
     "5. Confidence label definitions:\n"
-    "   - HIGH: the corrected sentence clearly reflects the intended meaning, "
-    "and no words/phrases were added, inferred, or substituted beyond fixing "
-    "character-level noise (spacing, capitalization, punctuation).\n"
-    "   - MEDIUM: some words are uncertain, or minor inference was needed, "
-    "but the gist is likely correct.\n"
-    "   - LOW: more than 2 words were substantially altered, or the corrected "
-    "sentence's meaning is a guess rather than a clear fix.\n"
-    "6. If confidence is MEDIUM or LOW, you MUST include the note: "
-    "\"This reconstruction may not reflect the original meaning.\" "
-    "Do NOT provide a contextual explanation paragraph in that case.\n"
-    "7. Do NOT invent specific details (times, named actions, first-person "
-    "narrative, verbs, or events) that are not clearly present in the input tokens.\n"
-    "8. Do not rephrase or substitute words that are already correct and clear "
-    "— only fix genuine OCR noise. Preserve original word choice "
-    "(\"put down\" must stay \"put down,\" not become \"put forward\").\n"
+    "   - HIGH: the corrected sentence clearly reflects the intended meaning, and no words/phrases were added, inferred, or substituted beyond fixing character-level noise (spacing, capitalization, punctuation).\n"
+    "   - MEDIUM: some words are uncertain, or minor inference was needed, but the gist is likely correct.\n"
+    "   - LOW: more than 2 words were substantially altered, or the corrected sentence's meaning is a guess rather than a clear fix.\n"
+    "6. If confidence is MEDIUM or LOW, you MUST include the note: \"This reconstruction may not reflect the original meaning.\" Do NOT provide a contextual explanation paragraph in that case.\n"
+    "7. Do NOT invent specific details (times, named actions, first-person narrative, verbs, or events) that are not clearly present in the input tokens.\n"
+    "8. Do not rephrase or substitute words that are already correct and clear — only fix genuine OCR noise. Preserve original word choice (\"put down\" must stay \"put down,\" not become \"put forward\").\n"
     "9. Do not output any additional chat or conversational text."
 )
 
@@ -180,14 +166,27 @@ def explain(ocr_text):
     added_content = "UNKNOWN"
     corrected_line = ""
     confidence = ""
+    uncertain_words_str = "none"
+    alternatives = []
+    
+    notes = []
+    context = []
 
     for line in lines:
         if line.startswith("Added content:"):
             added_content = line.split(":", 1)[1].strip()
         elif line.startswith("Corrected:"):
             corrected_line = line.split(":", 1)[1].strip()
+        elif line.startswith("Uncertain words:"):
+            uncertain_words_str = line.split(":", 1)[1].strip()
+        elif line.startswith("Alternatives:"):
+            alternatives.append(line.split(":", 1)[1].strip())
         elif line.startswith("Confidence:"):
             confidence = line.split(":", 1)[1].strip()
+        elif line.startswith("Note:"):
+            notes.append(line)
+        elif line.startswith("Context:"):
+            context.append(line)
 
     # --- Deterministic token-overlap check ---
     ocr_tokens = tokenize(corrected_ocr_text)
@@ -202,32 +201,49 @@ def explain(ocr_text):
     overridden = False
     if len(unmatched_tokens) > 0 and "HIGH" in confidence:
         # Override: downgrade to MEDIUM, strip Context, force disclaimer
-        new_lines = []
-        for line in lines:
-            if line.startswith("Confidence:"):
-                new_lines.append("Confidence: MEDIUM")
-            elif line.startswith("Note:") or line.startswith("Context:"):
-                continue
-            else:
-                new_lines.append(line)
-        # Clean trailing blanks
-        while new_lines and not new_lines[-1].strip():
-            new_lines.pop()
-        new_lines.append(
-            "Note: This reconstruction may not reflect the original meaning."
-        )
-        llm_output = "\n".join(new_lines)
+        confidence = "MEDIUM"
+        context = []
+        notes = ["Note: This reconstruction may not reflect the original meaning."]
         overridden = True
 
-    # --- Build display output ---
-    display_parts = [llm_output]
+    # --- Bold uncertain words in the corrected line ---
+    display_corrected = corrected_line
+    if uncertain_words_str.lower() != "none":
+        words = [w.strip() for w in uncertain_words_str.split(",") if w.strip()]
+        for w in words:
+            # Use regex to bold the exact word, case-insensitive
+            pattern = re.compile(r'\b' + re.escape(w) + r'\b', re.IGNORECASE)
+            display_corrected = pattern.sub(f"**{w}**", display_corrected)
 
-    display_parts.append("")
-    display_parts.append("─── Token-Overlap Check ───")
-    display_parts.append(f"Model claimed Added content: {added_content}")
-    display_parts.append(f"Unmatched tokens (code):     {unmatched_tokens if unmatched_tokens else '[] (none)'}")
+    # --- Build display output (Markdown) ---
+    display_parts = []
+    display_parts.append("### LLM Correction + Confidence")
+    
+    display_parts.append(f"**Corrected:** {display_corrected}")
+    display_parts.append(f"**Confidence:** {confidence}")
+    
     if overridden:
-        display_parts.append("⚠️  Confidence OVERRIDDEN from HIGH → MEDIUM by token check.")
+        display_parts.append("\n⚠️ *Confidence OVERRIDDEN from HIGH → MEDIUM by token check.*")
+
+    for note in notes:
+        display_parts.append(f"\n{note}")
+    
+    for ctx in context:
+        display_parts.append(f"\n{ctx}")
+        
+    if alternatives:
+        display_parts.append("")
+        display_parts.append("<details><summary>View Alternatives for Uncertain Words</summary>")
+        display_parts.append("<ul>")
+        for alt in alternatives:
+            display_parts.append(f"<li>{alt}</li>")
+        display_parts.append("</ul>")
+        display_parts.append("</details>")
+
+    display_parts.append("\n<hr>")
+    display_parts.append("#### Token-Overlap Check")
+    display_parts.append(f"- **Added content:** {added_content}")
+    display_parts.append(f"- **Unmatched tokens (code):** `{unmatched_tokens if unmatched_tokens else '[] (none)'}`")
 
     return "\n".join(display_parts)
 
@@ -332,6 +348,7 @@ def build_ui():
                             label="Line Image",
                             type="pil",
                             height=180,
+                            interactive=False,
                         )
                         
                         def load_sample(key):
@@ -358,11 +375,9 @@ def build_ui():
                             sample_explain_btn = gr.Button(
                                 "Explain", elem_classes=["explain-btn"]
                             )
-                        sample_explanation = gr.Textbox(
-                            label="LLM Correction + Confidence",
-                            interactive=False,
+                        sample_explanation = gr.Markdown(
+                            value="### LLM Correction + Confidence\n_Run Transcribe and Explain to see results here._",
                             elem_classes=["output-box"],
-                            lines=10,
                         )
 
                 def clear_sample_outputs():
@@ -416,11 +431,9 @@ def build_ui():
                             upload_explain_btn = gr.Button(
                                 "Explain", elem_classes=["explain-btn"]
                             )
-                        upload_explanation = gr.Textbox(
-                            label="LLM Correction + Confidence",
-                            interactive=False,
+                        upload_explanation = gr.Markdown(
+                            value="### LLM Correction + Confidence\n_Run Transcribe and Explain to see results here._",
                             elem_classes=["output-box"],
-                            lines=10,
                         )
 
                 def clear_upload_outputs():
