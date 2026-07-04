@@ -11,9 +11,7 @@ import torch
 import numpy as np
 from PIL import Image
 from groq import Groq
-import wordninja
 import re
-
 # --- Hack to force install missing dependencies if HF Spaces caching fails ---
 try:
     import sentencepiece
@@ -50,106 +48,16 @@ warnings.filterwarnings("ignore")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
 # ---------------------------------------------------------------------------
-# Florence-2 model loading with runtime compatibility patches
+# TrOCR model loading
 # ---------------------------------------------------------------------------
-# The Florence-2 remote code is incompatible with transformers v5+.
-# We apply three monkey-patches:
-#   1. PretrainedConfig.forced_bos_token_id — missing attribute
-#   2. _supports_sdpa — property not defined on custom pretrained model
-#   3. prepare_inputs_for_generation — EncoderDecoderCache not subscriptable
-# After loading, we manually tie the shared embedding weights because the
-# weight-tying mechanism doesn't fire correctly with the custom code.
-# ---------------------------------------------------------------------------
+from transformers import TrOCRProcessor, VisionEncoderDecoderModel, RobertaTokenizer
 
-from transformers import PretrainedConfig, PreTrainedModel
-from transformers.tokenization_utils_base import PreTrainedTokenizerBase
-
-# Patch 1: forced_bos_token_id
-PretrainedConfig.forced_bos_token_id = None
-
-# Patch 2: _supports_sdpa (class-level default; overridden per-module below)
-PreTrainedModel._supports_sdpa = False
-
-# Patch 3: additional_special_tokens property
-if not hasattr(PreTrainedTokenizerBase, "additional_special_tokens"):
-    @property
-    def additional_special_tokens(self):
-        return self.special_tokens_map.get("additional_special_tokens", [])
-    PreTrainedTokenizerBase.additional_special_tokens = additional_special_tokens
-
-from transformers.dynamic_module_utils import get_class_from_dynamic_module
-from transformers import AutoProcessor, AutoModelForCausalLM
-
-FLORENCE_MODEL_ID = "microsoft/Florence-2-base"
-
-print("Loading Florence-2 processor ...")
-processor = AutoProcessor.from_pretrained(FLORENCE_MODEL_ID, trust_remote_code=True)
-
-# Compile the dynamic module (downloads + imports classes) without instantiating
-print("Compiling Florence-2 dynamic module ...")
-get_class_from_dynamic_module(
-    "modeling_florence2.Florence2ForConditionalGeneration", FLORENCE_MODEL_ID
-)
-
-# Patch the compiled classes in sys.modules *before* the first from_pretrained
-for _mod_name in list(sys.modules.keys()):
-    if "modeling_florence2" not in _mod_name:
-        continue
-    _mod = sys.modules[_mod_name]
-
-    # Patch _supports_sdpa as a property that delegates to the inner language_model
-    if hasattr(_mod, "Florence2PreTrainedModel"):
-        _cls = getattr(_mod, "Florence2PreTrainedModel")
-
-        @property
-        def _patched_supports_sdpa(self):
-            if not hasattr(self, "language_model"):
-                return False
-            return getattr(self.language_model, "_supports_sdpa", False)
-
-        _cls._supports_sdpa = _patched_supports_sdpa
-
-    # Patch prepare_inputs_for_generation to convert EncoderDecoderCache → legacy
-    if hasattr(_mod, "Florence2LanguageForConditionalGeneration"):
-        _cls = getattr(_mod, "Florence2LanguageForConditionalGeneration")
-        _original_prepare = _cls.prepare_inputs_for_generation
-
-        def _patched_prepare(self, input_ids, past_key_values=None, **kwargs):
-            if past_key_values is not None:
-                if past_key_values.__class__.__name__ == "EncoderDecoderCache":
-                    if past_key_values.get_seq_length() == 0:
-                        past_key_values = None
-                    else:
-                        sa = tuple(
-                            (layer.keys, layer.values)
-                            for layer in past_key_values.self_attention_cache.layers
-                        )
-                        ca = tuple(
-                            (layer.keys, layer.values)
-                            for layer in past_key_values.cross_attention_cache.layers
-                        )
-                        past_key_values = tuple(
-                            (s[0], s[1], c[0], c[1]) for s, c in zip(sa, ca)
-                        )
-            return _original_prepare(
-                self, input_ids, past_key_values=past_key_values, **kwargs
-            )
-
-        _cls.prepare_inputs_for_generation = _patched_prepare
-
-# First (and only) model instantiation
-print("Loading Florence-2 model weights ...")
-model = AutoModelForCausalLM.from_pretrained(
-    FLORENCE_MODEL_ID, trust_remote_code=True, torch_dtype=torch.float32
-)
-
-# Fix weight tying: the checkpoint stores `language_model.model.shared.weight`
-# but embed_tokens and lm_head are randomly initialised by the loader.
-shared_w = model.language_model.model.shared.weight
-model.language_model.model.encoder.embed_tokens.weight = shared_w
-model.language_model.model.decoder.embed_tokens.weight = shared_w
-model.language_model.lm_head.weight = shared_w
-print("Florence-2 model loaded - weights tied OK")
+print("Loading TrOCR model and processor...")
+# Instantiate RobertaTokenizer manually to bypass TrOCR Processor bugs
+tokenizer = RobertaTokenizer.from_pretrained("microsoft/trocr-base-handwritten")
+processor = TrOCRProcessor.from_pretrained("microsoft/trocr-base-handwritten", tokenizer=tokenizer)
+model = VisionEncoderDecoderModel.from_pretrained("microsoft/trocr-base-handwritten")
+print("TrOCR Model loaded successfully.")
 
 # ---------------------------------------------------------------------------
 # Discover bundled sample line images  (samples/line_*.png)
@@ -215,63 +123,21 @@ def tokenize(text):
 # Core functions
 # ---------------------------------------------------------------------------
 
-def correct_spaces(text):
-    """Detect and split merged words (e.g., 'notthe' -> 'not the')."""
-    if not text:
-        return text
-    parts = re.split(r'(\W+)', text)
-    corrected_parts = []
-    for part in parts:
-        if part.isalpha() and len(part) > 3:
-            split_words = wordninja.split(part)
-            if len(split_words) > 1:
-                corrected_part = " ".join(split_words)
-                if part.istitle():
-                    corrected_part = corrected_part.capitalize()
-                elif part.isupper():
-                    corrected_part = corrected_part.upper()
-                corrected_parts.append(corrected_part)
-            else:
-                corrected_parts.append(part)
-        else:
-            corrected_parts.append(part)
-    return "".join(corrected_parts)
-
-
 def transcribe(image):
-    """Run Florence-2 OCR on one PIL image and return the raw transcription."""
+    """Run TrOCR on one PIL image and return the raw transcription."""
     if image is None:
         return "⚠️ Please select or upload an image first."
 
     pil_image = Image.fromarray(image) if not isinstance(image, Image.Image) else image
     pil_image = pil_image.convert("RGB")
 
-    # Pad to square to preserve aspect ratio, then resize to 768x768
-    max_dim = max(pil_image.width, pil_image.height)
-    padded = Image.new("RGB", (max_dim, max_dim), (255, 255, 255))
-    padded.paste(pil_image, ((max_dim - pil_image.width) // 2, (max_dim - pil_image.height) // 2))
-    pil_image_sq = padded.resize((768, 768), Image.Resampling.BILINEAR)
-
-    prompt = "<OCR>"
-    inputs = processor(text=prompt, images=pil_image_sq, return_tensors="pt")
-
+    pixel_values = processor(pil_image, return_tensors="pt").pixel_values
+    
     with torch.no_grad():
-        generated_ids = model.generate(
-            input_ids=inputs["input_ids"],
-            pixel_values=inputs["pixel_values"],
-            max_new_tokens=256,
-            do_sample=False,
-            num_beams=1,
-        )
+        generated_ids = model.generate(pixel_values, max_new_tokens=128)
 
-    generated_text = processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
-    parsed = processor.post_process_generation(
-        generated_text,
-        task=prompt,
-        image_size=(pil_image_sq.width, pil_image_sq.height),
-    )
-
-    return parsed.get("<OCR>", generated_text).strip()
+    generated_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+    return generated_text.strip()
 
 
 def transcribe_and_clear(image):
@@ -289,8 +155,8 @@ def explain(ocr_text):
             "Add it under Settings → Repository secrets in your HF Space."
         )
 
-    # Fix 1: Apply space correction before passing to Groq
-    corrected_ocr_text = correct_spaces(ocr_text)
+    # Pass raw OCR output directly to Groq
+    corrected_ocr_text = ocr_text
 
     client = Groq(api_key=GROQ_API_KEY)
 
@@ -330,9 +196,7 @@ def explain(ocr_text):
     for ct in corrected_tokens:
         matches = difflib.get_close_matches(ct, ocr_tokens, n=1, cutoff=0.7)
         if not matches:
-            # Fix 2: Substring containment check
-            if not any(ct in ot or ot in ct for ot in ocr_tokens):
-                unmatched_tokens.append(ct)
+            unmatched_tokens.append(ct)
 
     overridden = False
     if len(unmatched_tokens) > 0 and "HIGH" in confidence:
@@ -445,7 +309,7 @@ def build_ui():
         gr.Markdown(
             "<p id='app-subtitle'>"
             "Click a sample handwritten line below or upload your own — "
-            "Florence-2 transcribes, Groq explains."
+            "TrOCR transcribes, Groq explains."
             "</p>"
         )
 
@@ -481,7 +345,7 @@ def build_ui():
                         )
                     with gr.Column(scale=1):
                         sample_transcription = gr.Textbox(
-                            label="Raw Transcription (Florence-2)",
+                            label="Raw Transcription (TrOCR)",
                             interactive=False,
                             elem_classes=["output-box"],
                             lines=2,
@@ -533,13 +397,13 @@ def build_ui():
                         )
                         gr.Markdown(
                             "<p class='upload-caption'>"
-                            "Florence-2 handles single lines and paragraphs — "
-                            "no manual segmentation needed."
+                            "Upload a single handwritten line only — not a paragraph or tilted image. "
+                            "This app is optimized for clean, single-line handwriting."
                             "</p>"
                         )
                     with gr.Column(scale=1):
                         upload_transcription = gr.Textbox(
-                            label="Raw Transcription (Florence-2)",
+                            label="Raw Transcription (TrOCR)",
                             interactive=False,
                             elem_classes=["output-box"],
                             lines=2,
@@ -582,7 +446,7 @@ def build_ui():
         gr.Markdown(
             "<div style='text-align:center; color:#9ca3af; font-size:0.8rem; "
             "margin-top:1.5rem;'>"
-            "Powered by Florence-2 · Groq (Llama 3.3) · Gradio  ·  "
+            "Powered by TrOCR · Groq (Llama 3.3) · Gradio  ·  "
             "Samples from <a href='https://huggingface.co/datasets/Teklia/IAM-line' "
             "style='color:#667eea;'>Teklia/IAM-line</a>"
             "</div>"
