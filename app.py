@@ -50,12 +50,13 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 # ---------------------------------------------------------------------------
 # TrOCR model loading
 # ---------------------------------------------------------------------------
-from transformers import TrOCRProcessor, VisionEncoderDecoderModel, RobertaTokenizer
+from transformers import TrOCRProcessor, VisionEncoderDecoderModel, RobertaTokenizer, ViTImageProcessor
 
 print("Loading TrOCR model and processor...")
-# Instantiate RobertaTokenizer manually to bypass TrOCR Processor bugs
+# Instantiate RobertaTokenizer and ViTImageProcessor manually to bypass TrOCR Processor bugs
+image_processor = ViTImageProcessor.from_pretrained("microsoft/trocr-base-handwritten")
 tokenizer = RobertaTokenizer.from_pretrained("microsoft/trocr-base-handwritten")
-processor = TrOCRProcessor.from_pretrained("microsoft/trocr-base-handwritten", tokenizer=tokenizer, use_fast=False)
+processor = TrOCRProcessor(image_processor=image_processor, tokenizer=tokenizer)
 model = VisionEncoderDecoderModel.from_pretrained("microsoft/trocr-base-handwritten")
 print("TrOCR Model loaded successfully.")
 
