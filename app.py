@@ -4,7 +4,7 @@ import difflib
 import string
 import gradio as gr
 import torch
-from transformers import AutoProcessor, VisionEncoderDecoderModel, logging as hf_logging
+from transformers import TrOCRProcessor, ViTImageProcessor, RobertaTokenizer, VisionEncoderDecoderModel, logging as hf_logging
 from PIL import Image
 from groq import Groq
 import warnings
@@ -33,7 +33,9 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 # Load TrOCR model once at startup
 # ---------------------------------------------------------------------------
 print("Loading TrOCR processor and model …")
-processor = AutoProcessor.from_pretrained("microsoft/trocr-base-handwritten", use_fast=False)
+image_processor = ViTImageProcessor.from_pretrained("microsoft/trocr-base-handwritten")
+tokenizer = RobertaTokenizer.from_pretrained("microsoft/trocr-base-handwritten")
+processor = TrOCRProcessor(image_processor=image_processor, tokenizer=tokenizer)
 model = VisionEncoderDecoderModel.from_pretrained("microsoft/trocr-base-handwritten")
 print("Model loaded.")
 
