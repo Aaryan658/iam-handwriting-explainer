@@ -24,7 +24,7 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 # Load TrOCR model once at startup
 # ---------------------------------------------------------------------------
 print("Loading TrOCR processor and model …")
-processor = AutoProcessor.from_pretrained("microsoft/trocr-base-handwritten")
+processor = AutoProcessor.from_pretrained("microsoft/trocr-base-handwritten", use_fast=False)
 model = VisionEncoderDecoderModel.from_pretrained("microsoft/trocr-base-handwritten")
 print("Model loaded.")
 

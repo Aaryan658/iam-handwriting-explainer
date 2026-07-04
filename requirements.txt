@@ -6,3 +6,4 @@ groq
 datasets
 sentencepiece
 tiktoken
+protobuf
