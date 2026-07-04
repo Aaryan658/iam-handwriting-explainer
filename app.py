@@ -221,11 +221,8 @@ def transcribe(image):
     pil_image = Image.fromarray(image) if not isinstance(image, Image.Image) else image
     pil_image = pil_image.convert("RGB")
 
-    # Florence-2 expects square inputs — resize to 768×768
-    pil_image_sq = pil_image.resize((768, 768), Image.Resampling.BILINEAR)
-
     prompt = "<OCR>"
-    inputs = processor(text=prompt, images=pil_image_sq, return_tensors="pt")
+    inputs = processor(text=prompt, images=pil_image, return_tensors="pt")
 
     with torch.no_grad():
         generated_ids = model.generate(
@@ -240,7 +237,7 @@ def transcribe(image):
     parsed = processor.post_process_generation(
         generated_text,
         task=prompt,
-        image_size=(pil_image_sq.width, pil_image_sq.height),
+        image_size=(pil_image.width, pil_image.height),
     )
 
     return parsed.get("<OCR>", generated_text).strip()
