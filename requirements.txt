@@ -11,3 +11,5 @@ pydantic==2.10.6
 safetensors
 einops
 timm
+wordninja
+jiwer

@@ -11,6 +11,8 @@ import torch
 import numpy as np
 from PIL import Image
 from groq import Groq
+import wordninja
+import re
 
 # --- Hack to force install missing dependencies if HF Spaces caching fails ---
 try:
@@ -213,6 +215,29 @@ def tokenize(text):
 # Core functions
 # ---------------------------------------------------------------------------
 
+def correct_spaces(text):
+    """Detect and split merged words (e.g., 'notthe' -> 'not the')."""
+    if not text:
+        return text
+    parts = re.split(r'(\W+)', text)
+    corrected_parts = []
+    for part in parts:
+        if part.isalpha() and len(part) > 3:
+            split_words = wordninja.split(part)
+            if len(split_words) > 1:
+                corrected_part = " ".join(split_words)
+                if part.istitle():
+                    corrected_part = corrected_part.capitalize()
+                elif part.isupper():
+                    corrected_part = corrected_part.upper()
+                corrected_parts.append(corrected_part)
+            else:
+                corrected_parts.append(part)
+        else:
+            corrected_parts.append(part)
+    return "".join(corrected_parts)
+
+
 def transcribe(image):
     """Run Florence-2 OCR on one PIL image and return the raw transcription."""
     if image is None:
@@ -264,6 +289,9 @@ def explain(ocr_text):
             "Add it under Settings → Repository secrets in your HF Space."
         )
 
+    # Fix 1: Apply space correction before passing to Groq
+    corrected_ocr_text = correct_spaces(ocr_text)
+
     client = Groq(api_key=GROQ_API_KEY)
 
     try:
@@ -271,7 +299,7 @@ def explain(ocr_text):
             model="llama-3.3-70b-versatile",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": f"OCR output:\n{ocr_text}"},
+                {"role": "user", "content": f"OCR output:\n{corrected_ocr_text}"},
             ],
             temperature=0.2,
             max_tokens=300,
@@ -295,14 +323,16 @@ def explain(ocr_text):
             confidence = line.split(":", 1)[1].strip()
 
     # --- Deterministic token-overlap check ---
-    ocr_tokens = tokenize(ocr_text)
+    ocr_tokens = tokenize(corrected_ocr_text)
     corrected_tokens = tokenize(corrected_line)
 
     unmatched_tokens = []
     for ct in corrected_tokens:
         matches = difflib.get_close_matches(ct, ocr_tokens, n=1, cutoff=0.7)
         if not matches:
-            unmatched_tokens.append(ct)
+            # Fix 2: Substring containment check
+            if not any(ct in ot or ot in ct for ot in ocr_tokens):
+                unmatched_tokens.append(ct)
 
     overridden = False
     if len(unmatched_tokens) > 0 and "HIGH" in confidence:
