@@ -4,3 +4,5 @@ torch
 pillow
 groq
 datasets
+sentencepiece
+tiktoken
