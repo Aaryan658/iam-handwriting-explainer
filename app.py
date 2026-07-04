@@ -8,6 +8,15 @@ from transformers import AutoProcessor, VisionEncoderDecoderModel, logging as hf
 from PIL import Image
 from groq import Groq
 import warnings
+import sys
+import subprocess
+
+# --- Hack to force install missing dependencies if HF Spaces caching fails ---
+try:
+    import sentencepiece
+except ImportError:
+    print("Force installing sentencepiece...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "sentencepiece", "tiktoken", "protobuf"])
 
 # ---------------------------------------------------------------------------
 # Suppress noisy warnings
