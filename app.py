@@ -10,6 +10,7 @@ from groq import Groq
 import warnings
 import sys
 import subprocess
+import numpy as np
 
 # --- Hack to force install missing dependencies if HF Spaces caching fails ---
 try:
@@ -17,6 +18,22 @@ try:
 except ImportError:
     print("Force installing sentencepiece...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", "sentencepiece", "tiktoken", "protobuf"])
+
+# --- Hack to disable SSL verification on Windows to prevent HF Hub errors ---
+import ssl
+import httpx
+try:
+    ssl._create_default_https_context = ssl._create_unverified_context
+    os.environ["CURL_CA_BUNDLE"] = ""
+    os.environ["REQUESTS_CA_BUNDLE"] = ""
+    
+    old_init = httpx.Client.__init__
+    def new_init(self, *args, **kwargs):
+        kwargs["verify"] = False
+        old_init(self, *args, **kwargs)
+    httpx.Client.__init__ = new_init
+except Exception:
+    pass
 
 # ---------------------------------------------------------------------------
 # Suppress noisy warnings
@@ -103,18 +120,82 @@ def tokenize(text):
 # Core functions
 # ---------------------------------------------------------------------------
 
+def segment_lines(pil_image):
+    """Segment a paragraph/multi-line image into individual line images using horizontal projection profiling."""
+    gray = pil_image.convert("L")
+    arr = np.array(gray)
+    
+    # Dynamically handle light vs dark background
+    if np.mean(arr) > 127:
+        processed = 255.0 - arr
+    else:
+        processed = arr.astype(float)
+        
+    row_means = np.mean(processed, axis=1)
+    p_min = np.min(row_means)
+    p_max = np.max(row_means)
+    
+    # If range is very small, it's likely a blank/solid image
+    if p_max - p_min < 1.0:
+        return [pil_image]
+        
+    threshold = p_min + 0.05 * (p_max - p_min)
+    is_text = row_means > threshold
+    
+    lines = []
+    in_line = False
+    start_row = 0
+    
+    for r in range(len(is_text)):
+        if is_text[r] and not in_line:
+            in_line = True
+            start_row = r
+        elif (not is_text[r] or r == len(is_text) - 1) and in_line:
+            in_line = False
+            end_row = r
+            if end_row - start_row > 15:
+                # Add padding to avoid cropping ascenders/descenders too tightly
+                pad = 4
+                padded_start = max(0, start_row - pad)
+                padded_end = min(pil_image.height, end_row + pad)
+                line_crop = pil_image.crop((0, padded_start, pil_image.width, padded_end))
+                lines.append(line_crop)
+                
+    return lines
+
+
 def transcribe(image):
-    """Run TrOCR on one PIL image and return the raw transcription."""
+    """Run TrOCR on one PIL image (segments first if multi-line) and return the raw transcription."""
     if image is None:
         return "⚠️ Please select or upload an image first."
 
     pil_image = Image.fromarray(image) if not isinstance(image, Image.Image) else image
     pil_image = pil_image.convert("RGB")
 
-    pixel_values = processor(pil_image, return_tensors="pt").pixel_values
-    with torch.no_grad():
-        generated_ids = model.generate(pixel_values, max_new_tokens=64)
-    return processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+    lines = segment_lines(pil_image)
+
+    if len(lines) <= 1:
+        pixel_values = processor(pil_image, return_tensors="pt").pixel_values
+        with torch.no_grad():
+            generated_ids = model.generate(pixel_values, max_new_tokens=64)
+        return processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+
+    # Process each segmented line
+    transcriptions = []
+    for line_img in lines:
+        pixel_values = processor(line_img, return_tensors="pt").pixel_values
+        with torch.no_grad():
+            generated_ids = model.generate(pixel_values, max_new_tokens=64)
+        txt = processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
+        if txt:
+            transcriptions.append(txt)
+
+    return " ".join(transcriptions)
+
+
+def transcribe_and_clear(image):
+    """Run transcription and return transcription text plus an empty string to clear the explanation."""
+    return transcribe(image), ""
 
 
 def explain(ocr_text):
@@ -131,7 +212,7 @@ def explain(ocr_text):
 
     try:
         response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model="llama-3.3-70b-versatile",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": f"OCR output:\n{ocr_text}"},
@@ -289,15 +370,28 @@ def build_ui():
             with gr.Tab("📋 Sample Lines"):
                 with gr.Row():
                     with gr.Column(scale=1):
+                        sample_map = {f"Sample {i+1}: {os.path.basename(p)}": p for i, p in enumerate(SAMPLE_IMAGES)}
+                        sample_dropdown = gr.Dropdown(
+                            choices=list(sample_map.keys()),
+                            label="Bundled IAM Line Samples (select one)",
+                            value=None,
+                            interactive=True
+                        )
                         sample_image = gr.Image(
                             label="Line Image",
                             type="pil",
                             height=180,
                         )
-                        gr.Examples(
-                            examples=SAMPLE_IMAGES,
-                            inputs=sample_image,
-                            label="Bundled IAM Line Samples (click one)",
+                        
+                        def load_sample(key):
+                            if key and key in sample_map:
+                                return Image.open(sample_map[key]).convert("RGB")
+                            return None
+                            
+                        sample_dropdown.change(
+                            fn=load_sample,
+                            inputs=[sample_dropdown],
+                            outputs=[sample_image]
                         )
                     with gr.Column(scale=1):
                         sample_transcription = gr.Textbox(
@@ -320,10 +414,19 @@ def build_ui():
                             lines=10,
                         )
 
+                def clear_sample_outputs():
+                    return "", ""
+
+                sample_image.change(
+                    fn=clear_sample_outputs,
+                    inputs=[],
+                    outputs=[sample_transcription, sample_explanation],
+                )
+
                 sample_transcribe_btn.click(
-                    fn=transcribe,
+                    fn=transcribe_and_clear,
                     inputs=[sample_image],
-                    outputs=[sample_transcription],
+                    outputs=[sample_transcription, sample_explanation],
                 )
                 sample_explain_btn.click(
                     fn=explain,
@@ -369,10 +472,19 @@ def build_ui():
                             lines=10,
                         )
 
+                def clear_upload_outputs():
+                    return "", ""
+
+                upload_image.change(
+                    fn=clear_upload_outputs,
+                    inputs=[],
+                    outputs=[upload_transcription, upload_explanation],
+                )
+
                 upload_transcribe_btn.click(
-                    fn=transcribe,
+                    fn=transcribe_and_clear,
                     inputs=[upload_image],
-                    outputs=[upload_transcription],
+                    outputs=[upload_transcription, upload_explanation],
                 )
                 upload_explain_btn.click(
                     fn=explain,
