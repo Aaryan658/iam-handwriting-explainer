@@ -142,6 +142,20 @@ def explain(ocr_text):
             "Add it under Settings → Repository secrets in your HF Space."
         )
 
+    # --- Sanity check: do not call Groq on degenerate OCR output ---
+    words = ocr_text.split()
+    if len(words) < 3:
+        return "⚠️ Transcription unclear — this image may not be a supported single-line format. Try a different sample or a clearer single-line upload."
+        
+    single_char_or_digit_words = sum(1 for w in words if len(w) == 1 or w.isdigit())
+    if single_char_or_digit_words / len(words) >= 0.5:
+        return "⚠️ Transcription unclear — this image may not be a supported single-line format. Try a different sample or a clearer single-line upload."
+        
+    letters = sum(c.isalpha() for c in ocr_text)
+    non_whitespace = sum(not c.isspace() for c in ocr_text)
+    if non_whitespace > 0 and letters / non_whitespace < 0.4:
+        return "⚠️ Transcription unclear — this image may not be a supported single-line format. Try a different sample or a clearer single-line upload."
+
     # Pass raw OCR output directly to Groq
     corrected_ocr_text = ocr_text
 
