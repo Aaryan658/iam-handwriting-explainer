@@ -212,11 +212,20 @@ def explain(ocr_text):
 
     # --- Sanity check: do not call Groq on degenerate OCR output ---
     words = ocr_text.split()
-    if len(words) < 3:
+    
+    # Strip punctuation and filter empty tokens for word analysis
+    cleaned_words = [w.translate(str.maketrans("", "", string.punctuation)) for w in words]
+    cleaned_words = [w for w in cleaned_words if w]
+
+    if len(cleaned_words) < 3:
         return "⚠️ Transcription unclear — this image may not be a supported single-line format. Try a different sample or a clearer single-line upload."
         
-    single_char_or_digit_words = sum(1 for w in words if len(w) == 1 or w.isdigit())
-    if single_char_or_digit_words / len(words) >= 0.5:
+    # Count single-char words (excluding legitimate 'a' and 'i') and standalone digits
+    single_char_or_digit_words = sum(
+        1 for w in cleaned_words 
+        if (len(w) == 1 and w.lower() not in ["a", "i"]) or w.isdigit()
+    )
+    if len(cleaned_words) > 0 and single_char_or_digit_words / len(cleaned_words) >= 0.5:
         return "⚠️ Transcription unclear — this image may not be a supported single-line format. Try a different sample or a clearer single-line upload."
         
     letters = sum(c.isalpha() for c in ocr_text)
