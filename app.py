@@ -322,8 +322,10 @@ def explain(ocr_text):
             display_parts.append(f"<li>{alt}</li>")
         display_parts.append("</ul>")
         display_parts.append("</details>")
+        display_parts.append("")
 
-    display_parts.append("\n<hr>")
+    display_parts.append("<hr>")
+    display_parts.append("")
     display_parts.append("#### Token-Overlap Check")
     display_parts.append(f"- **Added content:** {added_content}")
     display_parts.append(f"- **Unmatched tokens (code):** `{unmatched_tokens if unmatched_tokens else '[] (none)'}`")
@@ -393,6 +395,15 @@ CUSTOM_CSS = """
     border-radius: 8px !important;
 }
 
+.markdown-box {
+    background-color: var(--block-background-fill) !important;
+    border: 1px solid var(--border-color-primary) !important;
+    border-radius: 8px !important;
+    padding: 16px !important;
+    min-height: 320px !important;
+    overflow-y: auto !important;
+}
+
 .upload-caption {
     color: #6b7280;
     font-size: 0.85rem;
@@ -460,7 +471,7 @@ def build_ui():
                             )
                         sample_explanation = gr.Markdown(
                             value="### LLM Correction + Confidence\n_Run Transcribe and Explain to see results here._",
-                            elem_classes=["output-box"],
+                            elem_classes=["output-box", "markdown-box"],
                         )
 
                 def clear_sample_outputs():
@@ -521,7 +532,7 @@ def build_ui():
                             )
                         upload_explanation = gr.Markdown(
                             value="### LLM Correction + Confidence\n_Run Transcribe and Explain to see results here._",
-                            elem_classes=["output-box"],
+                            elem_classes=["output-box", "markdown-box"],
                         )
 
                 def clear_upload_outputs():
