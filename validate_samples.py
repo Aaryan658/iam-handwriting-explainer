@@ -30,14 +30,13 @@ def main():
             with open(txt_path, "r", encoding="utf-8") as f:
                 ground_truth = f.read().strip()
                 
-        # 2. Run Florence-2 OCR
-        print("Running Florence-2...")
+        # 2. Run TrOCR
+        print("Running TrOCR...")
         raw_ocr = app.transcribe(img)
         print(f"[RAW OCR]: {raw_ocr}")
         
-        # 3. Run space correction
-        corrected_ocr = app.correct_spaces(raw_ocr)
-        print(f"[SPACE CORRECTED]: {corrected_ocr}")
+        # Space correction is deprecated (reverted wordninja), using raw ocr directly
+        corrected_ocr = raw_ocr
         
         # 4. Print Ground Truth and calculate WER
         if ground_truth:
