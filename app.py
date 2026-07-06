@@ -35,6 +35,70 @@ try:
 except Exception:
     pass
 
+# --- Hack to bypass Gradio SSRF 403 error on private/gated Spaces ---
+try:
+    import shutil
+    from urllib.parse import urlparse, unquote
+    import gradio.processing_utils
+
+    old_download = gradio.processing_utils.async_ssrf_protected_download
+    old_sync_download = gradio.processing_utils.ssrf_protected_download
+
+    async def new_download(url: str, cache_dir: str) -> str:
+        try:
+            parsed_url = urlparse(url)
+            path_part = unquote(parsed_url.path)
+            
+            local_path = None
+            if "/file=" in path_part:
+                local_path = path_part.split("/file=", 1)[1]
+            elif path_part.startswith("/file/"):
+                local_path = path_part[6:]
+                
+            if local_path and os.path.exists(local_path):
+                temp_dir = os.path.join(cache_dir, gradio.processing_utils.hash_url(url))
+                os.makedirs(temp_dir, exist_ok=True)
+                filename = os.path.basename(local_path)
+                full_temp_file_path = os.path.abspath(os.path.join(temp_dir, filename))
+                
+                shutil.copy(local_path, full_temp_file_path)
+                print(f"Bypassed SSRF download for local file: {local_path} -> {full_temp_file_path}")
+                return full_temp_file_path
+        except Exception as e:
+            print(f"Error in SSRF bypass patch: {e}")
+            
+        return await old_download(url, cache_dir)
+
+    def new_sync_download(url: str, cache_dir: str) -> str:
+        try:
+            parsed_url = urlparse(url)
+            path_part = unquote(parsed_url.path)
+            
+            local_path = None
+            if "/file=" in path_part:
+                local_path = path_part.split("/file=", 1)[1]
+            elif path_part.startswith("/file/"):
+                local_path = path_part[6:]
+                
+            if local_path and os.path.exists(local_path):
+                temp_dir = os.path.join(cache_dir, gradio.processing_utils.hash_url(url))
+                os.makedirs(temp_dir, exist_ok=True)
+                filename = os.path.basename(local_path)
+                full_temp_file_path = os.path.abspath(os.path.join(temp_dir, filename))
+                
+                shutil.copy(local_path, full_temp_file_path)
+                print(f"Bypassed SSRF sync download for local file: {local_path} -> {full_temp_file_path}")
+                return full_temp_file_path
+        except Exception as e:
+            print(f"Error in SSRF sync bypass patch: {e}")
+            
+        return old_sync_download(url, cache_dir)
+
+    gradio.processing_utils.async_ssrf_protected_download = new_download
+    gradio.processing_utils.ssrf_protected_download = new_sync_download
+except Exception as e:
+    print(f"Failed to apply SSRF bypass patch: {e}")
+
 # ---------------------------------------------------------------------------
 # Suppress noisy warnings
 # ---------------------------------------------------------------------------
