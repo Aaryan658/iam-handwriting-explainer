@@ -195,8 +195,8 @@ def transcribe(image):
 
 
 def transcribe_and_clear(image):
-    """Run transcription and return transcription text plus an empty string to clear the explanation."""
-    return transcribe(image), ""
+    """Run transcription and return transcription text plus placeholder explanation."""
+    return transcribe(image), "### LLM Correction + Confidence\n_Run Explain to see results here._"
 
 
 def explain(ocr_text):
@@ -464,7 +464,7 @@ def build_ui():
                         )
 
                 def clear_sample_outputs():
-                    return "", ""
+                    return "", "### LLM Correction + Confidence\n_Run Transcribe and Explain to see results here._"
 
                 sample_image.change(
                     fn=clear_sample_outputs,
@@ -525,7 +525,7 @@ def build_ui():
                         )
 
                 def clear_upload_outputs():
-                    return "", ""
+                    return "", "### LLM Correction + Confidence\n_Run Transcribe and Explain to see results here._"
 
                 upload_image.change(
                     fn=clear_upload_outputs,
