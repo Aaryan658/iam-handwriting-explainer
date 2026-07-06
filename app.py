@@ -115,8 +115,11 @@ def transcribe(image):
     if image is None:
         return "⚠️ Please select or upload an image first."
 
-    pil_image = Image.fromarray(image) if not isinstance(image, Image.Image) else image
-    pil_image = pil_image.convert("RGB")
+    if isinstance(image, str):
+        pil_image = Image.open(image).convert("RGB")
+    else:
+        pil_image = Image.fromarray(image) if not isinstance(image, Image.Image) else image
+        pil_image = pil_image.convert("RGB")
 
     pixel_values = processor(pil_image, return_tensors="pt").pixel_values
     
@@ -360,14 +363,14 @@ def build_ui():
                         )
                         sample_image = gr.Image(
                             label="Line Image",
-                            type="pil",
+                            type="filepath",
                             height=180,
                             interactive=False,
                         )
                         
                         def load_sample(key):
                             if key and key in sample_map:
-                                return Image.open(sample_map[key]).convert("RGB")
+                                return sample_map[key]
                             return None
                             
                         sample_dropdown.change(
@@ -422,7 +425,7 @@ def build_ui():
                     with gr.Column(scale=1):
                         upload_image = gr.Image(
                             label="Upload a handwritten image",
-                            type="pil",
+                            type="filepath",
                             height=180,
                         )
                         gr.Markdown(
