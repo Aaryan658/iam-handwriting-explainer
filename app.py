@@ -194,9 +194,10 @@ def transcribe(image):
     return generated_text.strip()
 
 
-def transcribe_and_clear(image):
-    """Run transcription and return transcription text plus placeholder explanation."""
-    return transcribe(image), "### LLM Correction + Confidence\n_Run Explain to see results here._"
+DEFAULT_EXPLANATION = "### LLM Correction + Confidence\n_Run Transcribe and Explain to see results here._"
+
+def reset_explanation():
+    return DEFAULT_EXPLANATION
 
 
 def explain(ocr_text):
@@ -475,7 +476,7 @@ def build_ui():
                         )
 
                 def clear_sample_outputs():
-                    return "", "### LLM Correction + Confidence\n_Run Transcribe and Explain to see results here._"
+                    return "", DEFAULT_EXPLANATION
 
                 sample_image.change(
                     fn=clear_sample_outputs,
@@ -485,13 +486,16 @@ def build_ui():
 
                 def transcribe_sample(key):
                     if not key or key not in sample_map:
-                        return "⚠️ Please select a sample first.", ""
-                    return transcribe_and_clear(sample_map[key])
+                        return "⚠️ Please select a sample first."
+                    return transcribe(sample_map[key])
 
                 sample_transcribe_btn.click(
+                    fn=reset_explanation,
+                    outputs=[sample_explanation],
+                ).then(
                     fn=transcribe_sample,
                     inputs=[sample_dropdown],
-                    outputs=[sample_transcription, sample_explanation],
+                    outputs=[sample_transcription],
                 )
                 sample_explain_btn.click(
                     fn=explain,
@@ -536,7 +540,7 @@ def build_ui():
                         )
 
                 def clear_upload_outputs():
-                    return "", "### LLM Correction + Confidence\n_Run Transcribe and Explain to see results here._"
+                    return "", DEFAULT_EXPLANATION
 
                 upload_image.change(
                     fn=clear_upload_outputs,
@@ -545,9 +549,12 @@ def build_ui():
                 )
 
                 upload_transcribe_btn.click(
-                    fn=transcribe_and_clear,
+                    fn=reset_explanation,
+                    outputs=[upload_explanation],
+                ).then(
+                    fn=transcribe,
                     inputs=[upload_image],
-                    outputs=[upload_transcription, upload_explanation],
+                    outputs=[upload_transcription],
                 )
                 upload_explain_btn.click(
                     fn=explain,
