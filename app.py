@@ -408,9 +408,14 @@ def build_ui():
                     outputs=[sample_transcription, sample_explanation],
                 )
 
+                def transcribe_sample(key):
+                    if not key or key not in sample_map:
+                        return "⚠️ Please select a sample first.", ""
+                    return transcribe_and_clear(sample_map[key])
+
                 sample_transcribe_btn.click(
-                    fn=transcribe_and_clear,
-                    inputs=[sample_image],
+                    fn=transcribe_sample,
+                    inputs=[sample_dropdown],
                     outputs=[sample_transcription, sample_explanation],
                 )
                 sample_explain_btn.click(
