@@ -208,11 +208,13 @@ def explain(ocr_text):
     # --- Deterministic token-overlap check ---
     ocr_tokens = tokenize(corrected_ocr_text)
     corrected_tokens = tokenize(corrected_line)
+    joined_ocr = "".join(ocr_tokens)
 
     unmatched_tokens = []
     for ct in corrected_tokens:
-        matches = difflib.get_close_matches(ct, ocr_tokens, n=1, cutoff=0.7)
-        if not matches:
+        cutoff = 0.6 if len(ct) <= 3 else 0.7
+        matches = difflib.get_close_matches(ct, ocr_tokens, n=1, cutoff=cutoff)
+        if not matches and ct not in joined_ocr:
             unmatched_tokens.append(ct)
 
     overridden = False
