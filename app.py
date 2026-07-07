@@ -226,6 +226,38 @@ def transcribe(image):
     return generated_text.strip()
 
 
+def log_correction(image_path_or_dropdown, trocr_text, user_correction):
+    """Log the user's correction to corrections_log.csv if provided."""
+    if not user_correction or not user_correction.strip():
+        return
+    
+    import csv
+    from datetime import datetime
+
+    if image_path_or_dropdown:
+        image_id = os.path.basename(image_path_or_dropdown)
+    else:
+        image_id = "unknown"
+        
+    log_file = "corrections_log.csv"
+    file_exists = os.path.exists(log_file)
+    
+    try:
+        with open(log_file, "a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow(["image_id", "trocr_output", "user_correction", "timestamp"])
+            writer.writerow([
+                image_id,
+                trocr_text,
+                user_correction.strip(),
+                datetime.utcnow().isoformat()
+            ])
+        gr.Info("Correction logged successfully. Thank you!")
+    except Exception as e:
+        print(f"Error logging correction: {e}")
+
+
 DEFAULT_EXPLANATION = "### LLM Correction + Confidence\n_Run Transcribe and Explain to see results here._"
 
 def reset_explanation():
@@ -481,8 +513,8 @@ def build_ui():
                         
                         def transcribe_sample_and_reset(key):
                             if not key or key not in sample_map:
-                                return "⚠️ Please select a sample first.", DEFAULT_EXPLANATION
-                            return transcribe(sample_map[key]), DEFAULT_EXPLANATION
+                                return "⚠️ Please select a sample first.", "", DEFAULT_EXPLANATION
+                            return transcribe(sample_map[key]), "", DEFAULT_EXPLANATION
 
                         sample_dropdown = gr.Dropdown(
                             choices=list(sample_map.keys()),
@@ -514,6 +546,11 @@ def build_ui():
                             elem_classes=["output-box"],
                             lines=2,
                         )
+                        sample_verify = gr.Textbox(
+                            label="Was the transcription correct? If not, enter the correct text (optional).",
+                            placeholder="Type correct transcription and press Enter, or click Explain to log.",
+                            interactive=True,
+                        )
                         with gr.Row():
                             sample_transcribe_btn = gr.Button(
                                 "Transcribe", elem_classes=["primary-btn"]
@@ -527,22 +564,31 @@ def build_ui():
                         )
 
                 def clear_sample_outputs():
-                    return "", DEFAULT_EXPLANATION
+                    return "", "", DEFAULT_EXPLANATION
 
                 sample_image.change(
                     fn=clear_sample_outputs,
                     inputs=[],
-                    outputs=[sample_transcription, sample_explanation],
+                    outputs=[sample_transcription, sample_verify, sample_explanation],
                 )
                 sample_transcribe_btn.click(
                     fn=transcribe_sample_and_reset,
                     inputs=[sample_dropdown],
-                    outputs=[sample_transcription, sample_explanation],
+                    outputs=[sample_transcription, sample_verify, sample_explanation],
                 )
                 sample_explain_btn.click(
                     fn=explain,
                     inputs=[sample_transcription],
                     outputs=[sample_explanation],
+                ).then(
+                    fn=log_correction,
+                    inputs=[sample_dropdown, sample_transcription, sample_verify],
+                    outputs=[]
+                )
+                sample_verify.submit(
+                    fn=log_correction,
+                    inputs=[sample_dropdown, sample_transcription, sample_verify],
+                    outputs=[]
                 )
 
             # ==============================================================
@@ -569,6 +615,11 @@ def build_ui():
                             elem_classes=["output-box"],
                             lines=2,
                         )
+                        upload_verify = gr.Textbox(
+                            label="Was the transcription correct? If not, enter the correct text (optional).",
+                            placeholder="Type correct transcription and press Enter, or click Explain to log.",
+                            interactive=True,
+                        )
                         with gr.Row():
                             upload_transcribe_btn = gr.Button(
                                 "Transcribe", elem_classes=["primary-btn"]
@@ -582,26 +633,35 @@ def build_ui():
                         )
 
                 def clear_upload_outputs():
-                    return "", DEFAULT_EXPLANATION
+                    return "", "", DEFAULT_EXPLANATION
 
                 upload_image.change(
                     fn=clear_upload_outputs,
                     inputs=[],
-                    outputs=[upload_transcription, upload_explanation],
+                    outputs=[upload_transcription, upload_verify, upload_explanation],
                 )
 
                 def transcribe_upload_and_reset(image):
-                    return transcribe(image), DEFAULT_EXPLANATION
+                    return transcribe(image), "", DEFAULT_EXPLANATION
 
                 upload_transcribe_btn.click(
                     fn=transcribe_upload_and_reset,
                     inputs=[upload_image],
-                    outputs=[upload_transcription, upload_explanation],
+                    outputs=[upload_transcription, upload_verify, upload_explanation],
                 )
                 upload_explain_btn.click(
                     fn=explain,
                     inputs=[upload_transcription],
                     outputs=[upload_explanation],
+                ).then(
+                    fn=log_correction,
+                    inputs=[upload_image, upload_transcription, upload_verify],
+                    outputs=[]
+                )
+                upload_verify.submit(
+                    fn=log_correction,
+                    inputs=[upload_image, upload_transcription, upload_verify],
+                    outputs=[]
                 )
 
             # ==============================================================
