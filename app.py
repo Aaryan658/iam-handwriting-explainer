@@ -227,7 +227,7 @@ def explain(ocr_text):
     cleaned_words = [w.translate(str.maketrans("", "", string.punctuation)) for w in words]
     cleaned_words = [w for w in cleaned_words if w]
 
-    if len(cleaned_words) < 3:
+    if len(cleaned_words) < 1:
         return "⚠️ Transcription unclear — this image may not be a supported single-line format. Try a different sample or a clearer single-line upload."
         
     # Count single-char words (excluding legitimate 'a' and 'i') and standalone digits
