@@ -1,4 +1,9 @@
 import os
+import sys
+try:
+    sys.stdout.reconfigure(encoding='utf-8')
+except AttributeError:
+    pass
 import jiwer
 from PIL import Image
 import app
