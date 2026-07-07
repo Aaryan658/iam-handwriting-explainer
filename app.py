@@ -45,9 +45,11 @@ try:
     old_sync_download = gradio.processing_utils.ssrf_protected_download
 
     async def new_download(url: str, cache_dir: str) -> str:
+        print(f"[DEBUG SSRF async_download] url={url} cache_dir={cache_dir}")
         try:
             parsed_url = urlparse(url)
             path_part = unquote(parsed_url.path)
+            print(f"[DEBUG SSRF async_download] path_part={path_part}")
             
             local_path = None
             if "/file=" in path_part:
@@ -55,6 +57,7 @@ try:
             elif path_part.startswith("/file/"):
                 local_path = path_part[6:]
                 
+            print(f"[DEBUG SSRF async_download] local_path={local_path} exists={os.path.exists(local_path) if local_path else False}")
             if local_path and os.path.exists(local_path):
                 temp_dir = os.path.join(cache_dir, gradio.processing_utils.hash_url(url))
                 os.makedirs(temp_dir, exist_ok=True)
@@ -70,9 +73,11 @@ try:
         return await old_download(url, cache_dir)
 
     def new_sync_download(url: str, cache_dir: str) -> str:
+        print(f"[DEBUG SSRF sync_download] url={url} cache_dir={cache_dir}")
         try:
             parsed_url = urlparse(url)
             path_part = unquote(parsed_url.path)
+            print(f"[DEBUG SSRF sync_download] path_part={path_part}")
             
             local_path = None
             if "/file=" in path_part:
@@ -80,6 +85,7 @@ try:
             elif path_part.startswith("/file/"):
                 local_path = path_part[6:]
                 
+            print(f"[DEBUG SSRF sync_download] local_path={local_path} exists={os.path.exists(local_path) if local_path else False}")
             if local_path and os.path.exists(local_path):
                 temp_dir = os.path.join(cache_dir, gradio.processing_utils.hash_url(url))
                 os.makedirs(temp_dir, exist_ok=True)
