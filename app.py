@@ -12,6 +12,7 @@ import numpy as np
 from PIL import Image
 from groq import Groq
 import re
+from segmentation import segment_lines
 # --- Hack to force install missing dependencies if HF Spaces caching fails ---
 try:
     import sentencepiece
@@ -226,6 +227,72 @@ def transcribe(image):
     return generated_text.strip()
 
 
+# Below this, a transcription's TrOCR-native confidence is considered too low
+# to spend a Groq call correcting -- the LLM would be "correcting" noise it
+# can't actually ground in a legible source.
+LOW_CONFIDENCE_GATE = 0.50
+
+
+def _confidence_label(avg_prob):
+    pct = round(avg_prob * 100)
+    if avg_prob >= 0.90:
+        label = "HIGH"
+    elif avg_prob >= 0.70:
+        label = "MEDIUM"
+    else:
+        label = "LOW"
+    return pct, label
+
+
+def format_confidence_badge(avg_prob, prefix="TrOCR model confidence"):
+    pct, label = _confidence_label(avg_prob)
+    return (
+        f"{prefix}: **{pct}%** "
+        f"<span class=\"confidence-badge {label.lower()}\">{label}</span>"
+    )
+
+
+def transcribe_with_confidence_score(image):
+    """Run TrOCR and return (text, avg_token_prob) -- the raw 0-1 model-grounded
+    confidence signal (mean max-softmax probability across generated tokens).
+
+    This is independent of the Groq LLM's self-reported confidence, which only
+    judges plausibility of the corrected text and can be overconfident on
+    inputs the OCR model itself was unsure about. Exposed as its own function
+    (rather than folded into transcribe_with_confidence) so multi-line callers
+    can aggregate several lines' raw scores before formatting a single badge.
+    """
+    if isinstance(image, str):
+        pil_image = Image.open(image).convert("RGB")
+    else:
+        pil_image = Image.fromarray(image) if not isinstance(image, Image.Image) else image
+        pil_image = pil_image.convert("RGB")
+
+    pixel_values = processor(pil_image, return_tensors="pt").pixel_values
+
+    with torch.no_grad():
+        output = model.generate(
+            pixel_values,
+            max_new_tokens=128,
+            output_scores=True,
+            return_dict_in_generate=True,
+        )
+
+    generated_text = processor.batch_decode(output.sequences, skip_special_tokens=True)[0].strip()
+    token_probs = [torch.softmax(scores, dim=-1).max().item() for scores in output.scores]
+    avg_prob = sum(token_probs) / len(token_probs) if token_probs else 0.0
+    return generated_text, avg_prob
+
+
+def transcribe_with_confidence(image):
+    """Run TrOCR and also return a model-grounded confidence badge (markdown)."""
+    if image is None:
+        return "⚠️ Please select or upload an image first.", ""
+
+    generated_text, avg_prob = transcribe_with_confidence_score(image)
+    return generated_text, format_confidence_badge(avg_prob)
+
+
 def log_correction(image_path_or_dropdown, trocr_text, user_correction):
     """Log the user's correction to corrections_log.csv if provided."""
     if not user_correction or not user_correction.strip():
@@ -264,7 +331,7 @@ def reset_explanation():
     return DEFAULT_EXPLANATION
 
 
-def explain(ocr_text):
+def explain(ocr_text, confidence_md=""):
     """Send transcription to Groq, run token-overlap check, return formatted output."""
     if not ocr_text or ocr_text.startswith("⚠️"):
         return "⚠️ Nothing to explain — run Transcribe first."
@@ -272,6 +339,18 @@ def explain(ocr_text):
         return (
             "⚠️ GROQ_API_KEY not found.\n"
             "Add it under Settings → Repository secrets in your HF Space."
+        )
+
+    # --- Low-confidence gate: skip the Groq call if TrOCR itself was unsure,
+    # rather than spending an API call "correcting" text that was never
+    # reliably read in the first place. ---
+    conf_match = re.search(r"\*\*(\d+)%\*\*", confidence_md or "")
+    if conf_match and int(conf_match.group(1)) / 100 < LOW_CONFIDENCE_GATE:
+        return (
+            "### LLM Correction + Confidence\n"
+            f"⚠️ TrOCR model confidence was only **{conf_match.group(1)}%** — too low to reliably "
+            "correct. Skipped the Groq call rather than risk correcting noise. "
+            "Try a clearer image or a different sample."
         )
 
     # --- Sanity check: do not call Groq on degenerate OCR output ---
@@ -377,7 +456,7 @@ def explain(ocr_text):
     display_parts.append("### LLM Correction + Confidence")
     
     display_parts.append(f"**Corrected:** {display_corrected}")
-    display_parts.append(f"**Confidence:** {confidence}")
+    display_parts.append(f"**Confidence:** <span class=\"confidence-badge {confidence.lower().strip()}\">{confidence}</span>")
     
     if overridden:
         display_parts.append("\n⚠️ *Confidence OVERRIDDEN from HIGH → MEDIUM by token check.*")
@@ -408,91 +487,360 @@ def explain(ocr_text):
 
 
 # ---------------------------------------------------------------------------
+# Paragraph pipeline UI wrapper
+# ---------------------------------------------------------------------------
+
+def transcribe_upload_and_reset(image):
+    """Route an uploaded image to the single-line or paragraph pipeline based
+    on how many lines segmentation detects, and return
+    (text, confidence_md, reset_verify, reset_explanation) for the UI.
+
+    Single line -> existing transcribe_with_confidence() path, unchanged.
+    2+ lines -> paragraph_pipeline, displayed as the reassembled continuous
+    text only (no per-line numbered breakdown) -- segmentation and per-line
+    transcription still happen internally exactly as before.
+    """
+    # Deferred import: paragraph_pipeline does `from app import transcribe`
+    # at module level; importing it here (after app.py is fully loaded)
+    # breaks the circular dependency without changing paragraph_pipeline.py.
+    import paragraph_pipeline as _pp
+
+    if image is None:
+        return "⚠️ Please upload an image first.", "", "", DEFAULT_EXPLANATION
+
+    pil_image = Image.open(image).convert("RGB") if isinstance(image, str) else image
+    lines = segment_lines(pil_image)
+
+    if len(lines) <= 1:
+        text, conf_md = transcribe_with_confidence(image)
+        return text, conf_md, "", DEFAULT_EXPLANATION
+
+    paragraph_text, conf_md, per_line = _pp.transcribe_paragraph_with_confidence(lines=lines)
+    if not per_line:
+        return "⚠️ No lines detected. Try an image with clearer line spacing.", "", "", DEFAULT_EXPLANATION
+
+    return paragraph_text, conf_md, "", DEFAULT_EXPLANATION
+
+
+# ---------------------------------------------------------------------------
 # Gradio UI  —  Blocks layout
 # ---------------------------------------------------------------------------
 
 CUSTOM_CSS = """
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+:root {
+    --background-fill-primary: #f8fafc;
+    --background-fill-secondary: #ffffff;
+    --block-background-fill: #ffffff;
+    --block-border-color: #e2e8f0;
+    --block-border-width: 1px;
+    --block-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05), 0 1px 2px -1px rgba(0, 0, 0, 0.05);
+    --block-title-text-color: #0f172a;
+    --body-background-fill: #f8fafc;
+    --body-text-color: #334155;
+    --border-color-accent: #6366f1;
+    --border-color-primary: #e2e8f0;
+    --button-primary-background-fill: #4f46e5;
+    --button-primary-background-fill-hover: #4338ca;
+    --button-primary-text-color: #ffffff;
+    --button-secondary-background-fill: #ffffff;
+    --button-secondary-background-fill-hover: #f1f5f9;
+    --button-secondary-text-color: #0f172a;
+    --input-background-fill: #ffffff;
+    --input-border-color: #e2e8f0;
+    --radius-lg: 12px;
+    --radius-md: 8px;
+    --radius-sm: 6px;
+}
 
-* { font-family: 'Inter', sans-serif; }
+.dark {
+    --background-fill-primary: #09090b;
+    --background-fill-secondary: #09090b;
+    --block-background-fill: #09090b;
+    --block-border-color: #27272a;
+    --block-border-width: 1px;
+    --block-shadow: 0 0 0 1px rgba(255, 255, 255, 0.02);
+    --block-title-text-color: #fafafa;
+    --body-background-fill: #09090b;
+    --body-text-color: #a1a1aa;
+    --border-color-accent: #6366f1;
+    --border-color-primary: #27272a;
+    --button-primary-background-fill: #4f46e5;
+    --button-primary-background-fill-hover: #4338ca;
+    --button-primary-text-color: #ffffff;
+    --button-secondary-background-fill: #18181b;
+    --button-secondary-background-fill-hover: #27272a;
+    --button-secondary-text-color: #fafafa;
+    --input-background-fill: #09090b;
+    --input-border-color: #27272a;
+}
+
+body, .gradio-container, .gradio-container * { 
+    font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important; 
+}
 
 .gradio-container {
-    max-width: 960px !important;
+    max-width: 1040px !important;
     margin: 0 auto !important;
+    padding: 32px 16px !important;
+    background-color: var(--background-fill-primary) !important;
 }
 
 #app-title {
+    font-size: 1.875rem !important;
+    font-weight: 700 !important;
+    color: var(--block-title-text-color) !important;
     text-align: center;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    font-size: 2rem;
-    font-weight: 700;
-    margin-bottom: 0;
+    margin-bottom: 6px !important;
+    letter-spacing: -0.025em !important;
 }
+
 #app-subtitle {
+    font-size: 0.9rem !important;
+    color: #64748b !important;
     text-align: center;
-    color: #6b7280;
-    font-size: 0.95rem;
-    margin-top: 0;
+    margin-top: 0 !important;
+    margin-bottom: 32px !important;
 }
 
-.primary-btn {
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
+.dark #app-subtitle {
+    color: #a1a1aa !important;
+}
+
+/* Containers / Cards */
+.gradio-container .block, .gradio-container .group {
+    border-radius: var(--radius-lg) !important;
+    border: 1px solid var(--block-border-color) !important;
+    background-color: var(--block-background-fill) !important;
+    box-shadow: var(--block-shadow) !important;
+    padding: 20px !important;
+}
+
+/* Tabs list container - pill style */
+.gradio-container [role="tablist"], .gradio-container .tab-nav {
+    display: inline-flex !important;
+    gap: 4px !important;
+    background: #f1f5f9 !important;
+    background-color: #f1f5f9 !important;
+    padding: 4px !important;
+    border-radius: 8px !important;
+    border: 1px solid #e2e8f0 !important;
+    margin-bottom: 24px !important;
+}
+
+.dark .gradio-container [role="tablist"], .dark .gradio-container .tab-nav {
+    background: #18181b !important;
+    background-color: #18181b !important;
+    border-color: #27272a !important;
+}
+
+/* Tab triggers */
+.gradio-container [role="tab"], .gradio-container .tab-nav button {
+    font-size: 0.875rem !important;
+    font-weight: 500 !important;
+    color: #64748b !important;
+    padding: 6px 16px !important;
+    border-radius: 6px !important;
     border: none !important;
-    color: white !important;
-    font-weight: 600 !important;
-    border-radius: 8px !important;
-    padding: 10px 24px !important;
-    transition: opacity 0.2s ease !important;
-}
-.primary-btn:hover {
-    opacity: 0.9 !important;
+    background: transparent !important;
+    transition: all 0.2s ease !important;
 }
 
-.explain-btn {
-    background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%) !important;
+.dark .gradio-container [role="tab"], .dark .gradio-container .tab-nav button {
+    color: #a1a1aa !important;
+}
+
+.gradio-container [role="tab"][aria-selected="true"], .gradio-container .tab-nav button.selected {
+    background: #ffffff !important;
+    background-color: #ffffff !important;
+    color: #0f172a !important;
+    box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.08), 0 1px 2px -1px rgba(0, 0, 0, 0.08) !important;
     border: none !important;
-    color: white !important;
-    font-weight: 600 !important;
-    border-radius: 8px !important;
-    padding: 10px 24px !important;
-    transition: opacity 0.2s ease !important;
-}
-.explain-btn:hover {
-    opacity: 0.9 !important;
 }
 
-.output-box textarea {
-    font-size: 1rem !important;
-    line-height: 1.6 !important;
-    border-radius: 8px !important;
+.dark .gradio-container [role="tab"][aria-selected="true"], .dark .gradio-container .tab-nav button.selected {
+    background: #27272a !important;
+    background-color: #27272a !important;
+    color: #fafafa !important;
+    box-shadow: none !important;
+    border: none !important;
 }
 
+/* Primary Button Styling */
+button.primary-btn, .gradio-container button.primary-btn, button.primary-btn.secondary, button.primary-btn.primary {
+    background: #4f46e5 !important;
+    background-color: #4f46e5 !important;
+    background-image: none !important;
+    color: #ffffff !important;
+    border: 1px solid #4f46e5 !important;
+    font-weight: 500 !important;
+    font-size: 0.875rem !important;
+    border-radius: 8px !important;
+    padding: 8px 16px !important;
+    transition: all 0.2s ease !important;
+    box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05) !important;
+}
+
+button.primary-btn:hover, .gradio-container button.primary-btn:hover {
+    background: #4338ca !important;
+    background-color: #4338ca !important;
+    border-color: #4338ca !important;
+}
+
+/* Explain Button Styling */
+button.explain-btn, .gradio-container button.explain-btn, button.explain-btn.secondary, button.explain-btn.primary {
+    background: #0f172a !important;
+    background-color: #0f172a !important;
+    background-image: none !important;
+    color: #ffffff !important;
+    border: 1px solid #0f172a !important;
+    font-weight: 500 !important;
+    font-size: 0.875rem !important;
+    border-radius: 8px !important;
+    padding: 8px 16px !important;
+    transition: all 0.2s ease !important;
+    box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05) !important;
+}
+
+button.explain-btn:hover, .gradio-container button.explain-btn:hover {
+    background: #1e293b !important;
+    background-color: #1e293b !important;
+    border-color: #1e293b !important;
+}
+
+.dark button.explain-btn, .dark .gradio-container button.explain-btn {
+    background: #27272a !important;
+    background-color: #27272a !important;
+    border-color: #27272a !important;
+    color: #fafafa !important;
+}
+
+.dark button.explain-btn:hover, .dark .gradio-container button.explain-btn:hover {
+    background: #3f3f46 !important;
+    background-color: #3f3f46 !important;
+    border-color: #3f3f46 !important;
+}
+
+/* Inputs & Textareas */
+.output-box textarea, input[type="text"], .gradio-dropdown {
+    border: 1px solid var(--block-border-color) !important;
+    background-color: var(--input-background-fill) !important;
+    color: var(--body-text-color) !important;
+    border-radius: 8px !important;
+    padding: 10px 14px !important;
+}
+
+/* Markdown box display */
 .markdown-box {
     background-color: var(--block-background-fill) !important;
-    border: 1px solid var(--border-color-primary) !important;
+    border: 1px solid var(--block-border-color) !important;
     border-radius: 8px !important;
     padding: 16px !important;
-    min-height: 320px !important;
-    overflow-y: auto !important;
+    min-height: 240px !important;
+    font-size: 0.95rem !important;
+    line-height: 1.6 !important;
+    color: var(--body-text-color) !important;
 }
 
 .upload-caption {
-    color: #6b7280;
-    font-size: 0.85rem;
-    font-style: italic;
-    margin-top: 4px;
+    color: #64748b !important;
+    font-size: 0.8rem !important;
+    margin-top: 8px !important;
 }
 
 .row-top-align {
     align-items: flex-start !important;
 }
+
+/* Color-Coded Confidence Badges */
+span.confidence-badge, .gradio-container span.confidence-badge, .markdown-box span.confidence-badge {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    padding: 2px 8px !important;
+    font-size: 0.75rem !important;
+    font-weight: 600 !important;
+    border-radius: 9999px !important;
+    margin-left: 6px !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.05em !important;
+}
+
+span.confidence-badge.high, .gradio-container span.confidence-badge.high {
+    background-color: #dcfce7 !important;
+    color: #15803d !important;
+}
+
+span.confidence-badge.medium, .gradio-container span.confidence-badge.medium {
+    background-color: #fef9c3 !important;
+    color: #a16207 !important;
+}
+
+span.confidence-badge.low, .gradio-container span.confidence-badge.low {
+    background-color: #fee2e2 !important;
+    color: #b91c1c !important;
+}
+
+.dark span.confidence-badge.high, .dark .gradio-container span.confidence-badge.high {
+    background-color: rgba(21, 128, 61, 0.25) !important;
+    color: #4ade80 !important;
+}
+
+.dark span.confidence-badge.medium, .dark .gradio-container span.confidence-badge.medium {
+    background-color: rgba(161, 98, 7, 0.25) !important;
+    color: #facc15 !important;
+}
+
+.dark span.confidence-badge.low, .dark .gradio-container span.confidence-badge.low {
+    background-color: rgba(185, 28, 28, 0.25) !important;
+    color: #f87171 !important;
+}
+
+@media (prefers-color-scheme: dark) {
+    span.confidence-badge.high, .gradio-container span.confidence-badge.high {
+        background-color: rgba(21, 128, 61, 0.25) !important;
+        color: #4ade80 !important;
+    }
+    span.confidence-badge.medium, .gradio-container span.confidence-badge.medium {
+        background-color: rgba(161, 98, 7, 0.25) !important;
+        color: #facc15 !important;
+    }
+    span.confidence-badge.low, .gradio-container span.confidence-badge.low {
+        background-color: rgba(185, 28, 28, 0.25) !important;
+        color: #f87171 !important;
+    }
+}
+
+/* Clean Tables styling */
+table {
+    width: 100% !important;
+    border-collapse: collapse !important;
+    margin-top: 16px !important;
+    margin-bottom: 16px !important;
+}
+
+th {
+    font-weight: 600 !important;
+    text-align: left !important;
+    padding: 10px 14px !important;
+    border-bottom: 1px solid var(--block-border-color) !important;
+    color: var(--block-title-text-color) !important;
+    background-color: var(--background-fill-primary) !important;
+}
+
+td {
+    padding: 10px 14px !important;
+    border-bottom: 1px solid var(--block-border-color) !important;
+    color: var(--body-text-color) !important;
+}
+
+tr:hover td {
+    background-color: var(--background-fill-primary) !important;
+}
 """
 
 
 def build_ui():
-    with gr.Blocks(css=CUSTOM_CSS, title="IAM Handwriting Explainer") as demo:
+    with gr.Blocks(theme=gr.themes.Base(), css=CUSTOM_CSS, title="IAM Handwriting Explainer") as demo:
         # ---- Header ----
         gr.Markdown("<h1 id='app-title'>✍️ IAM Handwriting Explainer</h1>")
         gr.Markdown(
@@ -513,8 +861,9 @@ def build_ui():
                         
                         def transcribe_sample_and_reset(key):
                             if not key or key not in sample_map:
-                                return "⚠️ Please select a sample first.", "", DEFAULT_EXPLANATION
-                            return transcribe(sample_map[key]), "", DEFAULT_EXPLANATION
+                                return "⚠️ Please select a sample first.", "", "", DEFAULT_EXPLANATION
+                            text, conf_md = transcribe_with_confidence(sample_map[key])
+                            return text, conf_md, "", DEFAULT_EXPLANATION
 
                         sample_dropdown = gr.Dropdown(
                             choices=list(sample_map.keys()),
@@ -546,6 +895,7 @@ def build_ui():
                             elem_classes=["output-box"],
                             lines=2,
                         )
+                        sample_confidence = gr.Markdown(value="")
                         sample_verify = gr.Textbox(
                             label="Was the transcription correct? If not, enter the correct text (optional).",
                             placeholder="Type correct transcription and press Enter, or click Explain to log.",
@@ -564,21 +914,21 @@ def build_ui():
                         )
 
                 def clear_sample_outputs():
-                    return "", "", DEFAULT_EXPLANATION
+                    return "", "", "", DEFAULT_EXPLANATION
 
                 sample_image.change(
                     fn=clear_sample_outputs,
                     inputs=[],
-                    outputs=[sample_transcription, sample_verify, sample_explanation],
+                    outputs=[sample_transcription, sample_confidence, sample_verify, sample_explanation],
                 )
                 sample_transcribe_btn.click(
                     fn=transcribe_sample_and_reset,
                     inputs=[sample_dropdown],
-                    outputs=[sample_transcription, sample_verify, sample_explanation],
+                    outputs=[sample_transcription, sample_confidence, sample_verify, sample_explanation],
                 )
                 sample_explain_btn.click(
                     fn=explain,
-                    inputs=[sample_transcription],
+                    inputs=[sample_transcription, sample_confidence],
                     outputs=[sample_explanation],
                 ).then(
                     fn=log_correction,
@@ -592,7 +942,7 @@ def build_ui():
                 )
 
             # ==============================================================
-            # Tab 2 — Upload  (optional path)
+            # Tab 2 — Upload  (auto-detects single-line vs multi-line)
             # ==============================================================
             with gr.Tab("📤 Upload"):
                 with gr.Row(elem_classes=["row-top-align"]):
@@ -600,58 +950,60 @@ def build_ui():
                         upload_image = gr.Image(
                             label="Upload a handwritten image",
                             type="filepath",
-                            height=180,
+                            height=220,
                         )
                         gr.Markdown(
                             "<p class='upload-caption'>"
-                            "Upload a single handwritten line only — not a paragraph or tilted image. "
-                            "This app is optimized for clean, single-line handwriting."
+                            "Upload a handwritten line or multi-line passage — the app "
+                            "automatically detects and handles both."
                             "</p>"
+                        )
+                        upload_transcribe_btn = gr.Button(
+                            "Transcribe", elem_classes=["primary-btn"]
+                        )
+                        MULTILINE_EXAMPLE = os.path.join(SAMPLES_DIR, "verified_multiline_test.png")
+                        gr.Examples(
+                            examples=[[MULTILINE_EXAMPLE]],
+                            inputs=[upload_image],
+                            label="Bundled multi-line sample (click to load)",
                         )
                     with gr.Column(scale=1):
                         upload_transcription = gr.Textbox(
                             label="Raw Transcription (TrOCR)",
                             interactive=False,
                             elem_classes=["output-box"],
-                            lines=2,
+                            lines=4,
                         )
+                        upload_confidence = gr.Markdown(value="")
                         upload_verify = gr.Textbox(
                             label="Was the transcription correct? If not, enter the correct text (optional).",
                             placeholder="Type correct transcription and press Enter, or click Explain to log.",
                             interactive=True,
                         )
-                        with gr.Row():
-                            upload_transcribe_btn = gr.Button(
-                                "Transcribe", elem_classes=["primary-btn"]
-                            )
-                            upload_explain_btn = gr.Button(
-                                "Explain", elem_classes=["explain-btn"]
-                            )
+                        upload_explain_btn = gr.Button(
+                            "Explain", elem_classes=["explain-btn"]
+                        )
                         upload_explanation = gr.Markdown(
-                            value="### LLM Correction + Confidence\n_Run Transcribe and Explain to see results here._",
+                            value=DEFAULT_EXPLANATION,
                             elem_classes=["output-box", "markdown-box"],
                         )
 
                 def clear_upload_outputs():
-                    return "", "", DEFAULT_EXPLANATION
+                    return "", "", "", DEFAULT_EXPLANATION
 
                 upload_image.change(
                     fn=clear_upload_outputs,
                     inputs=[],
-                    outputs=[upload_transcription, upload_verify, upload_explanation],
+                    outputs=[upload_transcription, upload_confidence, upload_verify, upload_explanation],
                 )
-
-                def transcribe_upload_and_reset(image):
-                    return transcribe(image), "", DEFAULT_EXPLANATION
-
                 upload_transcribe_btn.click(
                     fn=transcribe_upload_and_reset,
                     inputs=[upload_image],
-                    outputs=[upload_transcription, upload_verify, upload_explanation],
+                    outputs=[upload_transcription, upload_confidence, upload_verify, upload_explanation],
                 )
                 upload_explain_btn.click(
                     fn=explain,
-                    inputs=[upload_transcription],
+                    inputs=[upload_transcription, upload_confidence],
                     outputs=[upload_explanation],
                 ).then(
                     fn=log_correction,
@@ -740,4 +1092,4 @@ def build_ui():
 
 if __name__ == "__main__":
     demo = build_ui()
-    demo.launch()
+    demo.launch(server_port=int(os.environ["PORT"]) if os.environ.get("PORT") else None)
