@@ -27,7 +27,10 @@ def test_evaluate_stock_vs_pipeline_uses_transcribe_and_explain(monkeypatch):
         return "helo wrold"
 
     def fake_explain(ocr_text, confidence_md=""):
-        return "### LLM Correction + Confidence\nCorrected: hello world\nConfidence: HIGH\n"
+        # Mirrors app.explain()'s real formatting: a bold label and bolded
+        # "uncertain words" inline -- both must be stripped, not treated as
+        # literal transcribed characters.
+        return "**Corrected:** **hello** world\nConfidence: HIGH\n"
 
     monkeypatch.setattr("performance_metrics.transcribe", fake_transcribe)
     monkeypatch.setattr("performance_metrics.explain", fake_explain)

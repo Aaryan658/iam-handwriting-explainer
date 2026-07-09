@@ -20,8 +20,17 @@ def compute_cer_wer(hypothesis, reference):
 
 
 def _extract_corrected(explain_markdown):
-    match = re.search(r"Corrected:\s*(.+)", explain_markdown)
-    return match.group(1).strip() if match else ""
+    """Pull the corrected transcription out of explain()'s markdown output.
+
+    explain() renders the label as "**Corrected:**" and bolds individual
+    "uncertain words" within the corrected text itself (see app.py's
+    display_corrected step) -- both are presentation markup, not part of the
+    transcription, so they're stripped before CER/WER comparison.
+    """
+    match = re.search(r"Corrected:\**\s*(.+)", explain_markdown)
+    if not match:
+        return ""
+    return match.group(1).replace("**", "").strip()
 
 
 def evaluate_stock_vs_pipeline(ground_truth):

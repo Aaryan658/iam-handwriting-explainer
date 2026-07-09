@@ -6,6 +6,15 @@ import sys
 import subprocess
 import warnings
 
+# When run directly (`python app.py`), this module is registered in
+# sys.modules as "__main__", not "app". Sibling modules that do
+# `from app import transcribe` (paragraph_pipeline.py, performance_metrics.py)
+# then find no "app" entry and re-execute this entire file from scratch under
+# the name "app" -- reloading the TrOCR model a second time. Aliasing "app" to
+# the already-running "__main__" module avoids that duplicate execution.
+if __name__ == "__main__":
+    sys.modules.setdefault("app", sys.modules["__main__"])
+
 import gradio as gr
 import torch
 import numpy as np
@@ -838,6 +847,22 @@ tr:hover td {
 }
 """
 
+# ---------------------------------------------------------------------------
+# Live performance metrics (Performance tab) -- computed once at startup
+# against the bundled ground-truth samples, replacing hardcoded numbers.
+# ---------------------------------------------------------------------------
+import performance_metrics as _perf
+
+try:
+    _GROUND_TRUTH = _perf.load_ground_truth(os.path.join(SAMPLES_DIR, "ground_truth.csv"))
+    _COMPARISON_ROWS = _perf.evaluate_stock_vs_pipeline(_GROUND_TRUTH)
+    _AGGREGATE_CER = sum(r["pipeline_cer"] for r in _COMPARISON_ROWS) / len(_COMPARISON_ROWS)
+    _AGGREGATE_WER = sum(r["pipeline_wer"] for r in _COMPARISON_ROWS) / len(_COMPARISON_ROWS)
+except Exception as e:
+    print(f"Performance metrics computation failed at startup: {e}")
+    _COMPARISON_ROWS = []
+    _AGGREGATE_CER = _AGGREGATE_WER = 0.0
+
 
 def build_ui():
     with gr.Blocks(theme=gr.themes.Base(), css=CUSTOM_CSS, title="IAM Handwriting Explainer") as demo:
@@ -1025,20 +1050,17 @@ def build_ui():
                 with gr.Row():
                     with gr.Column(scale=1):
                         gr.Markdown(
-                            "### 📈 Batch Evaluation Metrics (30 Samples)\n"
-                            "This table shows TrOCR performance metrics computed over a streaming batch of 30 line samples "
-                            "from the `Teklia/IAM-line` dataset."
+                            "### 📈 Batch Evaluation Metrics (8 Bundled Samples)\n"
+                            "This table shows TrOCR + Groq pipeline performance metrics computed live at startup "
+                            "against the 8 bundled ground-truth samples from the `Teklia/IAM-line` dataset."
                         )
                         gr.Markdown(
-                            "| Metric | Value | Description |\n"
-                            "| :--- | :--- | :--- |\n"
-                            "| **Word Error Rate (WER)** | **9.27%** | The percentage of words incorrectly transcribed, omitted, or inserted. |\n"
-                            "| **Character Error Rate (CER)** | **2.44%** | The percentage of characters incorrectly transcribed. |\n"
-                            "| **Overall Word Accuracy** | **90.73%** | The percentage of correctly transcribed words ($1 - \\text{WER}$). |\n"
-                            "| **Overall Character Accuracy** | **97.56%** | The percentage of correctly transcribed characters ($1 - \\text{CER}$). |\n"
-                            "| **Groq HIGH Claims** | **27** | Number of samples where the LLM claimed HIGH confidence. |\n"
-                            "| **Hallucination Overrides** | **3** | Number of HIGH confidence claims downgraded to MEDIUM by the token check. |\n"
-                            "| **Hallucination Catch Rate** | **11.11%** | The percentage of HIGH claims correctly downgraded ($3 / 27$). |"
+                            "| Metric | Value |\n"
+                            "| :--- | :--- |\n"
+                            f"| **Word Error Rate (WER)** | **{_AGGREGATE_WER * 100:.2f}%** |\n"
+                            f"| **Character Error Rate (CER)** | **{_AGGREGATE_CER * 100:.2f}%** |\n"
+                            f"| **Overall Word Accuracy** | **{(1 - _AGGREGATE_WER) * 100:.2f}%** |\n"
+                            f"| **Overall Character Accuracy** | **{(1 - _AGGREGATE_CER) * 100:.2f}%** |"
                         )
                         
                         gr.Markdown(
@@ -1064,18 +1086,20 @@ def build_ui():
                 
                 gr.Markdown("<hr>")
                 gr.Markdown(
-                    "### 👥 Sample-by-Sample Comparison (5-Sample Set)\n"
-                    "A detailed comparison of transcription outputs between TrOCR and Florence-2 across our primary validation samples."
+                    "### 👥 Stock TrOCR vs Full Pipeline (8-Sample Set)\n"
+                    "A sample-by-sample comparison of raw TrOCR output against the full pipeline "
+                    "(TrOCR followed by Groq correction), computed live at startup against the bundled ground truth."
                 )
-                gr.Markdown(
-                    "| Sample / Image | Ground Truth | TrOCR Output | TrOCR Word Accuracy | Florence-2 Output | Florence-2 Word Accuracy |\n"
-                    "| :--- | :--- | :--- | :---: | :--- | :---: |\n"
-                    "| **Sample 1** (`line_01.png`) | *put down a resolution on the subject* | \"put down a resolution on the subject\" | **100.00%** | \"put down a resolution on the subject\" | 100.00% |\n"
-                    "| **Sample 2** (`line_02.png`) | *and he is to be backed by Mr. Will* | \"and he is to be backed by Mr. Will\" | **100.00%** | \"and we to be backed by Mr. Will\" | 77.78% |\n"
-                    "| **Sample 3** (`line_03.png`) | *nominating any more Labour life Peers* | \"nominating any more Labour life Peers\" | **100.00%** | \"nominating any more Labour life Pess\" | 66.67% |\n"
-                    "| **Sample 4** (`line_05.png`) | *Griffiths, M P for Manchester Exchange .* | \"Griffiths , MP for Manchester Exchange .\" | **57.14%** | \"Giftus, HP for Manchester Exchange,\" | 28.57% |\n"
-                    "| **Sample 5** (`education_paragraph.png`) | *Education is not the learning of many facts, but the training of the mind to think.* | \"0 1\" | 0.00% <br>*(Single-line limit)* | \"Upload a handwritten line imageEducations notthe learning ofmany facts,but the trainingof the snuid tothink.\" | **46.15%** <br>*(Layout-aware)* |"
-                )
+                _comparison_lines = [
+                    "| Sample | Ground Truth | Stock TrOCR | Stock CER | Pipeline (TrOCR+Groq) | Pipeline CER |",
+                    "| :--- | :--- | :--- | :---: | :--- | :---: |",
+                ]
+                for r in _COMPARISON_ROWS:
+                    _comparison_lines.append(
+                        f"| {r['image_path']} | {r['reference']} | {r['stock_output']} | "
+                        f"{r['stock_cer']*100:.2f}% | {r['pipeline_output']} | {r['pipeline_cer']*100:.2f}% |"
+                    )
+                gr.Markdown("\n".join(_comparison_lines))
 
         # ---- Footer ----
         gr.Markdown(
