@@ -22,6 +22,7 @@ from PIL import Image
 from groq import Groq
 import re
 from segmentation import segment_lines
+import ocr_engines
 # --- Hack to force install missing dependencies if HF Spaces caching fails ---
 try:
     import sentencepiece
@@ -302,36 +303,77 @@ def transcribe_with_confidence(image):
     return generated_text, format_confidence_badge(avg_prob)
 
 
-def log_correction(image_path_or_dropdown, trocr_text, user_correction):
-    """Log the user's correction to corrections_log.csv if provided."""
+def _persist_correction_image(image_path):
+    """Copy image_path into correction_images/ if it isn't already a
+    permanent file under SAMPLES_DIR, so it survives past Gradio's
+    temp-file lifecycle and can be re-run through OCR engines later."""
+    if not image_path or not os.path.exists(image_path):
+        return ""
+    if os.path.abspath(image_path).startswith(os.path.abspath(SAMPLES_DIR)):
+        return image_path
+
+    import shutil
+    from datetime import datetime
+
+    os.makedirs("correction_images", exist_ok=True)
+    dest_name = f"{datetime.utcnow().strftime('%Y%m%dT%H%M%S%f')}_{os.path.basename(image_path)}"
+    dest_path = os.path.join("correction_images", dest_name)
+    shutil.copyfile(image_path, dest_path)
+    return dest_path
+
+
+def log_correction(image_label, image_path, trocr_text, groq_explanation, user_correction):
+    """Log the user's correction -- along with TrOCR's, Groq's, Tesseract's,
+    and EasyOCR's output for the same image -- to corrections_log.csv, and
+    return the refreshed learning dashboard so the UI stays in sync."""
     if not user_correction or not user_correction.strip():
-        return
-    
+        return build_corrections_dashboard()
+
     import csv
     from datetime import datetime
 
-    if image_path_or_dropdown:
-        image_id = os.path.basename(image_path_or_dropdown)
-    else:
-        image_id = "unknown"
-        
+    image_id = os.path.basename(image_label) if image_label else "unknown"
+    persisted_path = _persist_correction_image(image_path)
+    groq_text = extract_corrected_text(groq_explanation) if groq_explanation else ""
+
+    tesseract_text = ""
+    easyocr_text = ""
+    if persisted_path:
+        try:
+            tesseract_text = ocr_engines.tesseract_transcribe(persisted_path)
+        except Exception as e:
+            print(f"Tesseract comparison failed: {e}")
+        try:
+            easyocr_text = ocr_engines.easyocr_transcribe(persisted_path)
+        except Exception as e:
+            print(f"EasyOCR comparison failed: {e}")
+
     log_file = "corrections_log.csv"
     file_exists = os.path.exists(log_file)
-    
+
     try:
         with open(log_file, "a", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             if not file_exists:
-                writer.writerow(["image_id", "trocr_output", "user_correction", "timestamp"])
+                writer.writerow([
+                    "image_id", "image_path", "trocr_output", "groq_output",
+                    "tesseract_output", "easyocr_output", "user_correction", "timestamp"
+                ])
             writer.writerow([
                 image_id,
+                persisted_path,
                 trocr_text,
+                groq_text,
+                tesseract_text,
+                easyocr_text,
                 user_correction.strip(),
                 datetime.utcnow().isoformat()
             ])
         gr.Info("Correction logged successfully. Thank you!")
     except Exception as e:
         print(f"Error logging correction: {e}")
+
+    return build_corrections_dashboard()
 
 
 DEFAULT_EXPLANATION = "### LLM Correction + Confidence\n_Run Transcribe and Explain to see results here._"
@@ -1004,13 +1046,13 @@ def build_ui():
                     outputs=[sample_explanation],
                 ).then(
                     fn=log_correction,
-                    inputs=[sample_dropdown, sample_transcription, sample_verify],
-                    outputs=[]
+                    inputs=[sample_dropdown, sample_image, sample_transcription, sample_explanation, sample_verify],
+                    outputs=[corrections_dashboard_display]
                 )
                 sample_verify.submit(
                     fn=log_correction,
-                    inputs=[sample_dropdown, sample_transcription, sample_verify],
-                    outputs=[]
+                    inputs=[sample_dropdown, sample_image, sample_transcription, sample_explanation, sample_verify],
+                    outputs=[corrections_dashboard_display]
                 )
 
             # ==============================================================
@@ -1079,13 +1121,13 @@ def build_ui():
                     outputs=[upload_explanation],
                 ).then(
                     fn=log_correction,
-                    inputs=[upload_image, upload_transcription, upload_verify],
-                    outputs=[]
+                    inputs=[upload_image, upload_image, upload_transcription, upload_explanation, upload_verify],
+                    outputs=[corrections_dashboard_display]
                 )
                 upload_verify.submit(
                     fn=log_correction,
-                    inputs=[upload_image, upload_transcription, upload_verify],
-                    outputs=[]
+                    inputs=[upload_image, upload_image, upload_transcription, upload_explanation, upload_verify],
+                    outputs=[corrections_dashboard_display]
                 )
 
             # ==============================================================
