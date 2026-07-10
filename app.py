@@ -340,6 +340,25 @@ def reset_explanation():
     return DEFAULT_EXPLANATION
 
 
+def get_recent_correction_examples(n=5):
+    """Read the last n logged corrections as (trocr_output, user_correction)
+    pairs, most recent first, for use as Groq few-shot examples."""
+    log_file = "corrections_log.csv"
+    if not os.path.exists(log_file):
+        return []
+
+    import csv as _csv
+    with open(log_file, "r", newline="", encoding="utf-8") as f:
+        rows = list(_csv.DictReader(f))
+
+    recent = rows[-n:][::-1]
+    return [
+        (r["trocr_output"], r["user_correction"])
+        for r in recent
+        if r.get("trocr_output") and r.get("user_correction")
+    ]
+
+
 def explain(ocr_text, confidence_md=""):
     """Send transcription to Groq, run token-overlap check, return formatted output."""
     if not ocr_text or ocr_text.startswith("⚠️"):
@@ -388,13 +407,27 @@ def explain(ocr_text, confidence_md=""):
     # Pass raw OCR output directly to Groq
     corrected_ocr_text = ocr_text
 
+    correction_examples = get_recent_correction_examples()
+    system_prompt = SYSTEM_PROMPT
+    if correction_examples:
+        examples_block = "\n".join(
+            f'- OCR said "{wrong}" -> correct reading is "{right}"'
+            for wrong, right in correction_examples
+        )
+        system_prompt = (
+            SYSTEM_PROMPT
+            + "\n\nKnown correction patterns from past user feedback (for "
+            "reference only -- do not copy verbatim unless the current OCR "
+            "output shows the same error):\n" + examples_block
+        )
+
     client = Groq(api_key=GROQ_API_KEY)
 
     try:
         response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"OCR output:\n{corrected_ocr_text}"},
             ],
             temperature=0.2,
