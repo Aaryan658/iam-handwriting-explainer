@@ -13,3 +13,4 @@ env/
 .ruff_cache/
 .ipynb_checkpoints/
 data/
+correction_images/
