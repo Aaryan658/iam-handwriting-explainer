@@ -11,3 +11,5 @@ pydantic==2.10.6
 safetensors
 jiwer
 opencv-python
+pytesseract
+easyocr
