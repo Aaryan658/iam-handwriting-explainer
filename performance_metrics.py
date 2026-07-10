@@ -1,11 +1,10 @@
 """Live performance metrics for the Performance tab: CER/WER against the
 bundled ground-truth samples, and a stock-TrOCR-vs-full-pipeline comparison."""
 import csv
-import re
 
 import jiwer
 
-from app import transcribe, explain
+from app import transcribe, explain, extract_corrected_text
 
 
 def load_ground_truth(csv_path="samples/ground_truth.csv"):
@@ -17,20 +16,6 @@ def compute_cer_wer(hypothesis, reference):
     cer = jiwer.cer(reference, hypothesis)
     wer = jiwer.wer(reference, hypothesis)
     return cer, wer
-
-
-def _extract_corrected(explain_markdown):
-    """Pull the corrected transcription out of explain()'s markdown output.
-
-    explain() renders the label as "**Corrected:**" and bolds individual
-    "uncertain words" within the corrected text itself (see app.py's
-    display_corrected step) -- both are presentation markup, not part of the
-    transcription, so they're stripped before CER/WER comparison.
-    """
-    match = re.search(r"Corrected:\**\s*(.+)", explain_markdown)
-    if not match:
-        return ""
-    return match.group(1).replace("**", "").strip()
 
 
 def evaluate_stock_vs_pipeline(ground_truth):
@@ -46,7 +31,7 @@ def evaluate_stock_vs_pipeline(ground_truth):
         stock_cer, stock_wer = compute_cer_wer(stock_output, reference)
 
         explain_output = explain(stock_output)
-        pipeline_output = _extract_corrected(explain_output) or stock_output
+        pipeline_output = extract_corrected_text(explain_output) or stock_output
         pipeline_cer, pipeline_wer = compute_cer_wer(pipeline_output, reference)
 
         results.append({

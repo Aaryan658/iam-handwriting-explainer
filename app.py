@@ -495,6 +495,20 @@ def explain(ocr_text, confidence_md=""):
     return "\n".join(display_parts)
 
 
+def extract_corrected_text(explanation_markdown):
+    """Pull the corrected transcription out of explain()'s markdown output.
+
+    explain() renders the label as "**Corrected:**" and bolds individual
+    "uncertain words" within the corrected text itself -- both are
+    presentation markup, not part of the transcription, so they're stripped
+    before any CER/WER comparison or logging.
+    """
+    match = re.search(r"Corrected:\**\s*(.+)", explanation_markdown or "")
+    if not match:
+        return ""
+    return match.group(1).replace("**", "").strip()
+
+
 # ---------------------------------------------------------------------------
 # Paragraph pipeline UI wrapper
 # ---------------------------------------------------------------------------
