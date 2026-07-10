@@ -17,8 +17,33 @@ def tesseract_transcribe(image_path):
 def _get_easyocr_reader():
     global _easyocr_reader
     if _easyocr_reader is None:
+        import ssl
         import easyocr
-        _easyocr_reader = easyocr.Reader(["en"], gpu=False)
+
+        # This machine's network runs Sophos TLS inspection, whose intercepting
+        # CA cert has a malformed Basic Constraints extension (not marked
+        # critical). Python 3.14 enables ssl.VERIFY_X509_STRICT by default,
+        # which makes OpenSSL reject that cert on github.com /
+        # raw.githubusercontent.com (where EasyOCR fetches its model weights via
+        # urllib.request.urlretrieve, which sources its default HTTPS context
+        # from ssl._create_default_https_context) even though the cert chain is
+        # otherwise trusted. Relax only that one strict structural check -- not
+        # hostname verification or CA trust-chain verification -- and only for
+        # the duration of this download, then restore the original default so
+        # the rest of the app (TrOCR/huggingface.co downloads, Groq API calls)
+        # keeps full default strict verification.
+        original_https_context = ssl._create_default_https_context
+
+        def _relaxed_context(*args, **kwargs):
+            ctx = ssl.create_default_context(*args, **kwargs)
+            ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
+            return ctx
+
+        ssl._create_default_https_context = _relaxed_context
+        try:
+            _easyocr_reader = easyocr.Reader(["en"], gpu=False)
+        finally:
+            ssl._create_default_https_context = original_https_context
     return _easyocr_reader
 
 
