@@ -1,3 +1,1 @@
 image_id,image_path,trocr_output,groq_output,tesseract_output,easyocr_output,user_correction,timestamp
-Sample 1: line_01.png,samples/line_01.png,put down a resolution on the subject,put down a resolution on the subject,prle Aowu a vesolkrtiorn cou bbhe_ HQDji2 Ve,Puk dusl 0 vejoluhon ON Llr _ >uQeak,this is a corrected sample transcription,2026-07-07T09:22:10.207318
-Sample 1: line_01.png,samples/line_01.png,put down a resolution on the subject,put down a resolution on the subject,prle Aowu a vesolkrtiorn cou bbhe_ HQDji2 Ve,Puk dusl 0 vejoluhon ON Llr _ >uQeak,put down a resolution on the subject matter,2026-07-10T01:55:41.996372

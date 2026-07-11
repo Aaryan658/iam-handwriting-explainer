@@ -1399,15 +1399,14 @@ def build_ui():
                         gr.Markdown("\n".join(_bundled_metric_lines))
                         
                         gr.Markdown(
-                            "### 🧠 Why TrOCR Was Chosen Over Florence-2\n"
-                            "While Microsoft's Florence-2 is a highly capable and versatile vision-language model supporting multi-line layouts and document understanding, "
-                            "it exhibits a noticeable accuracy gap on handwriting transcription compared to TrOCR. Across our single-line validation set, "
-                            "TrOCR consistently achieves significantly lower Word Error Rates (WER) and Character Error Rates (CER), capturing subtle handwriting "
-                            "nuances and uppercase letters (such as names and political titles) with high precision (e.g., preserving \"Peers\" and \"Griffiths\"). "
-                            "Florence-2, on the other hand, frequently introduces word-level substitutions and runs words together (e.g., \"notthe\", \"ofmany\"), "
-                            "making it less reliable for verbatim historical transcription. Since the primary focus of the IAM Handwriting Explainer is "
-                            "high-fidelity single-line handwriting explanation and verification, TrOCR was chosen to power the core transcription pipeline, "
-                            "supplemented by a deterministic token-overlap check and Groq-based LLM post-processing."
+                            "### 🧠 Why TrOCR Powers This Pipeline\n"
+                            "TrOCR (`trocr-large-handwritten`) is fine-tuned specifically for handwriting recognition, "
+                            "unlike general-purpose vision-language models (e.g. Florence-2) that target broader document "
+                            "understanding rather than character-level handwriting fidelity. This project did not run a "
+                            "benchmarked comparison against those alternatives — the choice reflects task specialization, "
+                            "not a measured result. The numbers actually measured on this app's own pipeline are the "
+                            "engine-comparison tables above and below: stock TrOCR against the TrOCR+Groq pipeline, "
+                            "Tesseract, and EasyOCR, computed live against real ground truth."
                         )
                         
                     with gr.Column(scale=1):
