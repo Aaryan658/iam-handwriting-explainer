@@ -308,9 +308,24 @@ def transcribe_with_confidence(image):
     return generated_text, format_confidence_badge(avg_prob)
 
 
+def _engine_cer_wer(rows, field):
+    """Aggregate CER/WER for one engine's output column across every row
+    that has both a value in that column and a user_correction to compare
+    against. Returns (cer, wer) or None if no row qualifies."""
+    import jiwer
+
+    pairs = [(r[field], r["user_correction"]) for r in rows if r.get(field) and r.get("user_correction")]
+    if not pairs:
+        return None
+    cers = [jiwer.cer(reference, hypothesis) for hypothesis, reference in pairs]
+    wers = [jiwer.wer(reference, hypothesis) for hypothesis, reference in pairs]
+    return sum(cers) / len(cers), sum(wers) / len(wers)
+
+
 def build_corrections_dashboard():
-    """Summarize corrections_log.csv into a small 'the AI is learning from
-    you' panel -- surfaces data the app already collects but never displays."""
+    """Summarize corrections_log.csv into a 'recent corrections' table plus
+    a live, growing per-engine accuracy table -- surfaces data the app
+    already collects but never displayed before."""
     log_file = "corrections_log.csv"
     empty_msg = (
         "### 📈 Learning From Your Corrections\n"
@@ -337,6 +352,29 @@ def build_corrections_dashboard():
     ]
     for r in recent:
         lines.append(f"| {r['image_id']} | {r['trocr_output'][:40]} | {r['user_correction'][:40]} |")
+
+    lines += [
+        "",
+        "### 📈 Live Accuracy From Your Corrections",
+        "_Computed from every correction you've logged — grows as you use the app._",
+        "",
+        "| Engine | WER | CER |",
+        "| :--- | :---: | :---: |",
+    ]
+    engines = [
+        ("Stock TrOCR", "trocr_output"),
+        ("TrOCR + Groq (Pipeline)", "groq_output"),
+        ("Tesseract", "tesseract_output"),
+        ("EasyOCR", "easyocr_output"),
+    ]
+    for label, field in engines:
+        result = _engine_cer_wer(rows, field)
+        if result:
+            cer, wer = result
+            lines.append(f"| {label} | {wer*100:.2f}% | {cer*100:.2f}% |")
+        else:
+            lines.append(f"| {label} | _no data yet_ | _no data yet_ |")
+
     return "\n".join(lines)
 
 
