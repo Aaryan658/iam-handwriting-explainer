@@ -20,8 +20,8 @@ def test_compute_cer_wer_detects_errors():
     assert wer > 0.0
 
 
-def test_evaluate_stock_vs_pipeline_uses_transcribe_and_explain(monkeypatch):
-    from performance_metrics import evaluate_stock_vs_pipeline
+def test_evaluate_all_engines_uses_transcribe_explain_and_ocr_engines(monkeypatch):
+    from performance_metrics import evaluate_all_engines
 
     def fake_transcribe(image_path):
         return "helo wrold"
@@ -34,13 +34,17 @@ def test_evaluate_stock_vs_pipeline_uses_transcribe_and_explain(monkeypatch):
 
     monkeypatch.setattr("performance_metrics.transcribe", fake_transcribe)
     monkeypatch.setattr("performance_metrics.explain", fake_explain)
+    monkeypatch.setattr("performance_metrics._engines.tesseract_transcribe", lambda image_path: "he1o wor1d")
+    monkeypatch.setattr("performance_metrics._engines.easyocr_transcribe", lambda image_path: "helo world")
 
     ground_truth = [{"image_path": "line_01.png", "text": "hello world"}]
-    results = evaluate_stock_vs_pipeline(ground_truth)
+    results = evaluate_all_engines(ground_truth)
 
     assert len(results) == 1
     row = results[0]
     assert row["image_path"] == "line_01.png"
     assert row["stock_output"] == "helo wrold"
     assert row["pipeline_output"] == "hello world"
+    assert row["tesseract_output"] == "he1o wor1d"
+    assert row["easyocr_output"] == "helo world"
     assert row["stock_cer"] > row["pipeline_cer"]
