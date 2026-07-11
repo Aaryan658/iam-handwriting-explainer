@@ -675,6 +675,7 @@ def explain(ocr_text, confidence_md=""):
         )
         llm_output = response.choices[0].message.content
     except Exception as e:
+        print(f"Groq API error in explain(): {e}")
         return f"⚠️ Groq API error: {e}"
 
     # --- Parse structured fields from LLM response ---
