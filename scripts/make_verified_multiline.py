@@ -4,12 +4,13 @@ gaps, save as samples/verified_multiline_test.png, then run
 paragraph_pipeline.transcribe_paragraph() on it and print raw output.
 """
 import os, sys
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _REPO_ROOT)
 
 from PIL import Image
 import paragraph_pipeline
 
-SAMPLES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "samples")
+SAMPLES = os.path.join(_REPO_ROOT, "samples")
 OUT = os.path.join(SAMPLES, "verified_multiline_test.png")
 GAP = 60  # px of white between lines
 

@@ -29,4 +29,4 @@ jobs:
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
-          python validate_samples.py
+          python scripts/validate_samples.py

@@ -6,6 +6,10 @@ except AttributeError:
     pass
 import jiwer
 from PIL import Image
+
+# app.py lives at the repo root, one level up from scripts/ -- add it to
+# sys.path so this bare import keeps resolving after the move.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import app
 
 # Define the samples to validate

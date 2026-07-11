@@ -4,11 +4,12 @@ Step 3a: paragraph_pipeline.transcribe_paragraph on a clean multi-line image.
 Step 3b: paragraph_pipeline.transcribe_paragraph on all 8 single-line samples.
 """
 import sys, os
-sys.path.insert(0, os.path.dirname(__file__))
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _REPO_ROOT)
 
 import paragraph_pipeline
 
-SAMPLES_DIR = os.path.join(os.path.dirname(__file__), "samples")
+SAMPLES_DIR = os.path.join(_REPO_ROOT, "samples")
 
 # ── 3a ──────────────────────────────────────────────────────────────────────
 print("=" * 70)
@@ -39,8 +40,8 @@ print("=" * 70)
 print("3b. ALL SINGLE-LINE SAMPLES (regression check)")
 print("=" * 70)
 for img_rel, gt_rel in single_line_samples:
-    img_path = os.path.join(os.path.dirname(__file__), img_rel)
-    gt_path  = os.path.join(os.path.dirname(__file__), gt_rel)
+    img_path = os.path.join(_REPO_ROOT, img_rel)
+    gt_path  = os.path.join(_REPO_ROOT, gt_rel)
     expected = open(gt_path, encoding="utf-8").read().strip()
 
     print(f"\n--- {img_rel} ---")
