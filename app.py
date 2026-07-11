@@ -303,6 +303,38 @@ def transcribe_with_confidence(image):
     return generated_text, format_confidence_badge(avg_prob)
 
 
+def build_corrections_dashboard():
+    """Summarize corrections_log.csv into a small 'the AI is learning from
+    you' panel -- surfaces data the app already collects but never displays."""
+    log_file = "corrections_log.csv"
+    empty_msg = (
+        "### 📈 Learning From Your Corrections\n"
+        "_No corrections logged yet — use the correction box after Transcribe "
+        "to help improve future accuracy._"
+    )
+    if not os.path.exists(log_file):
+        return empty_msg
+
+    import csv as _csv
+    with open(log_file, "r", newline="", encoding="utf-8") as f:
+        rows = list(_csv.DictReader(f))
+
+    if not rows:
+        return empty_msg
+
+    recent = rows[-5:][::-1]
+    lines = [
+        "### 📈 Learning From Your Corrections",
+        f"**{len(rows)}** correction(s) logged so far. Most recent:",
+        "",
+        "| Sample | TrOCR Output | Your Correction |",
+        "| :--- | :--- | :--- |",
+    ]
+    for r in recent:
+        lines.append(f"| {r['image_id']} | {r['trocr_output'][:40]} | {r['user_correction'][:40]} |")
+    return "\n".join(lines)
+
+
 def _persist_correction_image(image_path):
     """Copy image_path into correction_images/ if it isn't already a
     permanent file under SAMPLES_DIR, so it survives past Gradio's
@@ -964,6 +996,11 @@ def build_ui():
             "</p>"
         )
 
+        # Defined here (render=False) so Sample/Upload tab event handlers can
+        # target it as an output; actually placed in the Performance tab below
+        # via .render().
+        corrections_dashboard_display = gr.Markdown(value=build_corrections_dashboard(), render=False)
+
         with gr.Tabs():
             # ==============================================================
             # Tab 1 — Sample Lines  (primary demo path)
@@ -1135,7 +1172,8 @@ def build_ui():
             # ==============================================================
             with gr.Tab("📊 Performance"):
                 gr.Markdown("## 📊 Model Performance & Validation Analysis")
-                
+                corrections_dashboard_display.render()
+
                 with gr.Row():
                     with gr.Column(scale=1):
                         gr.Markdown(
