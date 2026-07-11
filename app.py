@@ -1143,7 +1143,12 @@ import performance_metrics as _perf
 
 
 def _aggregate(rows, field):
-    return sum(r[field] for r in rows) / len(rows)
+    """Average a numeric field across rows, skipping rows where it's None
+    (e.g. Groq was rate-limited/unavailable for that sample). Returns None
+    if no row has a usable value, rather than raising or averaging in a
+    missing correction as if it were a real zero-change result."""
+    values = [r[field] for r in rows if r[field] is not None]
+    return sum(values) / len(values) if values else None
 
 
 try:
@@ -1396,7 +1401,10 @@ def build_ui():
                             "| :--- | :---: | :---: |",
                         ]
                         for _engine_label, (_wer, _cer) in _BUNDLED_METRICS.items():
-                            _bundled_metric_lines.append(f"| **{_engine_label}** | **{_wer*100:.2f}%** | **{_cer*100:.2f}%** |")
+                            if _wer is None or _cer is None:
+                                _bundled_metric_lines.append(f"| **{_engine_label}** | _unavailable this run_ | _unavailable this run_ |")
+                            else:
+                                _bundled_metric_lines.append(f"| **{_engine_label}** | **{_wer*100:.2f}%** | **{_cer*100:.2f}%** |")
                         gr.Markdown("\n".join(_bundled_metric_lines))
                         
                         gr.Markdown(
@@ -1431,10 +1439,16 @@ def build_ui():
                     "| :--- | :--- | :--- | :---: | :--- | :---: | :--- | :---: | :--- | :---: |",
                 ]
                 for r in _COMPARISON_ROWS:
+                    if r['pipeline_cer'] is None:
+                        pipeline_output_cell = "_unavailable_"
+                        pipeline_cer_cell = "—"
+                    else:
+                        pipeline_output_cell = _md_table_cell(r['pipeline_output'])
+                        pipeline_cer_cell = f"{r['pipeline_cer']*100:.2f}%"
                     _comparison_lines.append(
                         f"| {_md_table_cell(r['image_path'])} | {_md_table_cell(r['reference'])} | "
                         f"{_md_table_cell(r['stock_output'])} | {r['stock_cer']*100:.2f}% | "
-                        f"{_md_table_cell(r['pipeline_output'])} | {r['pipeline_cer']*100:.2f}% | "
+                        f"{pipeline_output_cell} | {pipeline_cer_cell} | "
                         f"{_md_table_cell(r['tesseract_output'])} | {r['tesseract_cer']*100:.2f}% | "
                         f"{_md_table_cell(r['easyocr_output'])} | {r['easyocr_cer']*100:.2f}% |"
                     )

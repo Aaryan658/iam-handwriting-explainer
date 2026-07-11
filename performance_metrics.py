@@ -32,8 +32,18 @@ def evaluate_all_engines(ground_truth):
         stock_cer, stock_wer = compute_cer_wer(stock_output, reference)
 
         explain_output = explain(stock_output)
-        pipeline_output = extract_corrected_text(explain_output) or stock_output
-        pipeline_cer, pipeline_wer = compute_cer_wer(pipeline_output, reference)
+        corrected_text = extract_corrected_text(explain_output)
+        if corrected_text:
+            pipeline_output = corrected_text
+            pipeline_cer, pipeline_wer = compute_cer_wer(pipeline_output, reference)
+        else:
+            # explain() couldn't produce a correction (Groq error, rate limit,
+            # missing key, etc.) -- keep its raw message for transparency and
+            # leave CER/WER as None rather than silently scoring stock_output
+            # as if Groq had confirmed it unchanged.
+            pipeline_output = explain_output
+            pipeline_cer = None
+            pipeline_wer = None
 
         tesseract_output = _engines.tesseract_transcribe(image_path)
         tesseract_cer, tesseract_wer = compute_cer_wer(tesseract_output, reference)
