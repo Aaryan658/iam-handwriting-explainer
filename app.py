@@ -308,6 +308,21 @@ def transcribe_with_confidence(image):
     return generated_text, format_confidence_badge(avg_prob)
 
 
+def _md_table_cell(text):
+    """Flatten text for safe interpolation into a single markdown table row.
+
+    A literal newline splits the row into multiple lines and an unescaped
+    '|' reads as an extra column delimiter -- either one desyncs Gradio's
+    Markdown table parser for every row that follows. Tesseract in
+    particular hallucinates multi-line garbage (with stray '|' characters)
+    on noisy handwriting crops, so this must run on every OCR/user-text
+    value before it goes into a table cell.
+    """
+    if text is None:
+        return ""
+    return str(text).replace("\r\n", " ").replace("\n", " ").replace("|", "\\|").strip()
+
+
 def _engine_cer_wer(rows, field):
     """Aggregate CER/WER for one engine's output column across every row
     that has both a value in that column and a user_correction to compare
@@ -351,7 +366,10 @@ def build_corrections_dashboard():
         "| :--- | :--- | :--- |",
     ]
     for r in recent:
-        lines.append(f"| {r['image_id']} | {r['trocr_output'][:40]} | {r['user_correction'][:40]} |")
+        image_id = _md_table_cell(r['image_id'])[:40]
+        trocr_output = _md_table_cell(r['trocr_output'])[:40]
+        user_correction = _md_table_cell(r['user_correction'])[:40]
+        lines.append(f"| {image_id} | {trocr_output} | {user_correction} |")
 
     lines += [
         "",
@@ -1414,10 +1432,11 @@ def build_ui():
                 ]
                 for r in _COMPARISON_ROWS:
                     _comparison_lines.append(
-                        f"| {r['image_path']} | {r['reference']} | {r['stock_output']} | "
-                        f"{r['stock_cer']*100:.2f}% | {r['pipeline_output']} | {r['pipeline_cer']*100:.2f}% | "
-                        f"{r['tesseract_output']} | {r['tesseract_cer']*100:.2f}% | "
-                        f"{r['easyocr_output']} | {r['easyocr_cer']*100:.2f}% |"
+                        f"| {_md_table_cell(r['image_path'])} | {_md_table_cell(r['reference'])} | "
+                        f"{_md_table_cell(r['stock_output'])} | {r['stock_cer']*100:.2f}% | "
+                        f"{_md_table_cell(r['pipeline_output'])} | {r['pipeline_cer']*100:.2f}% | "
+                        f"{_md_table_cell(r['tesseract_output'])} | {r['tesseract_cer']*100:.2f}% | "
+                        f"{_md_table_cell(r['easyocr_output'])} | {r['easyocr_cer']*100:.2f}% |"
                     )
                 gr.Markdown("\n".join(_comparison_lines))
 
