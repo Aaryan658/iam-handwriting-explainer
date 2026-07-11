@@ -1,0 +1,10 @@
+gradio
+transformers
+torch
+pillow
+groq
+datasets
+sentencepiece
+tiktoken
+protobuf
+requests

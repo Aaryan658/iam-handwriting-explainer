@@ -1,1 +1,5 @@
 image_id,image_path,trocr_output,groq_output,tesseract_output,easyocr_output,user_correction,timestamp
+Screenshot 2026-07-04 113041.png,correction_images\20260711T074901814380_Screenshot 2026-07-04 113041.png,Turkish coffee .,,,Tuitigh eklez,Turkish coffee,2026-07-11T07:49:03.747588
+Sample 3: line_03.png,correction_images\20260711T075857938985_line_03.png,nominating any more Labour life Peers,nominating any more Labour life peers,OWL UO wag OmA UOUR Lohower Ute. § Fooro,uowiuak;w3 a Llone_ Labaur life_ FeQjs,nominating any more Labour life Peers,2026-07-11T07:59:01.889779
+Sample 3: line_03.png,correction_images\20260711T075904376284_line_03.png,nominating any more Labour life Peers,nominating any more Labour life peers,OWL UO wag OmA UOUR Lohower Ute. § Fooro,uowiuak;w3 a Llone_ Labaur life_ FeQjs,nominating any more Labour life Peers,2026-07-11T07:59:08.176028
+Sample 2: line_02.png,correction_images\20260711T082232576018_line_02.png,and he is to be backed by Mr. Will,and he is to be backed by Mr. Williams,"out “WR we te VQ bHAchear by hur, Win",o40 Lq _ 6 Qq _ baolea Ar. W ;u 80 64,and he is to be backed by Mr. Will,2026-07-11T08:22:38.103991

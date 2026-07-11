@@ -13,4 +13,7 @@ env/
 .ruff_cache/
 .ipynb_checkpoints/
 data/
+.hf_cache/
+out/
 correction_images/
+sophos_ca*.pem

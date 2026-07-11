@@ -23,6 +23,24 @@ import csv
 import os
 import random
 
+# --- Keep all HF downloads/caches inside the project directory (D:), not
+# the default C:\Users\...\.cache -- must be set before importing
+# transformers so it picks this up. ---
+_PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+_HF_CACHE_DIR = os.path.join(_PROJECT_ROOT, ".hf_cache")
+os.environ.setdefault("HF_HOME", _HF_CACHE_DIR)
+os.environ.setdefault("HF_HUB_CACHE", os.path.join(_HF_CACHE_DIR, "hub"))
+
+# --- huggingface_hub's httpx client hits "Cannot send a request, as the
+# client has been closed" in this environment (same issue app.py works
+# around) -- forcing verify=False on every httpx.Client avoids it. ---
+import httpx as _httpx
+_old_httpx_init = _httpx.Client.__init__
+def _patched_httpx_init(self, *a, **kw):
+    kw["verify"] = False
+    _old_httpx_init(self, *a, **kw)
+_httpx.Client.__init__ = _patched_httpx_init
+
 import numpy as np
 import torch
 import cv2
@@ -205,6 +223,7 @@ def main():
         save_strategy="epoch",
         logging_steps=10,
         report_to=[],
+        fp16=torch.cuda.is_available(),
     )
 
     trainer = Seq2SeqTrainer(
