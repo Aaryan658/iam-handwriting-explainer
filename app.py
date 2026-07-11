@@ -171,6 +171,23 @@ OPENROUTER_FALLBACK_MODELS = [
 def _openrouter_client():
     return OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
 
+
+def _openrouter_chat_completion(client, **kwargs):
+    """Try each model in OPENROUTER_FALLBACK_MODELS in order, returning the
+    first successful response. Free-tier upstream providers rate-limit
+    independently per model, so passing a 'models' fallback list to
+    OpenRouter's API doesn't help when 'model' is also set -- 'model' wins
+    and the list is ignored. Doing the fallback here, one plain call per
+    model, sidesteps that ambiguity entirely."""
+    last_error = None
+    for model_name in OPENROUTER_FALLBACK_MODELS:
+        try:
+            return client.chat.completions.create(model=model_name, **kwargs)
+        except Exception as e:
+            print(f"OpenRouter model {model_name} failed, trying next: {e}")
+            last_error = e
+    raise last_error
+
 # ---------------------------------------------------------------------------
 # TrOCR model loading
 # ---------------------------------------------------------------------------
@@ -538,9 +555,8 @@ def graphology_read(image):
         "Be creative and complimentary, not clinical."
     )
     try:
-        response = client.chat.completions.create(
-            model=OPENROUTER_MODEL,
-            extra_body={"models": OPENROUTER_FALLBACK_MODELS},
+        response = _openrouter_chat_completion(
+            client,
             messages=[
                 {"role": "system", "content": "You write short, fun, lighthearted handwriting personality reads. Never claim scientific validity."},
                 {"role": "user", "content": prompt},
@@ -571,9 +587,8 @@ def pen_pal_reply(ocr_text):
 
     client = _openrouter_client()
     try:
-        response = client.chat.completions.create(
-            model=OPENROUTER_MODEL,
-            extra_body={"models": OPENROUTER_FALLBACK_MODELS},
+        response = _openrouter_chat_completion(
+            client,
             messages=[
                 {"role": "system", "content": (
                     "You are a pen pal replying to a handwritten letter, matching its "
@@ -683,9 +698,8 @@ def explain(ocr_text, confidence_md=""):
     client = _openrouter_client()
 
     try:
-        response = client.chat.completions.create(
-            model=OPENROUTER_MODEL,
-            extra_body={"models": OPENROUTER_FALLBACK_MODELS},
+        response = _openrouter_chat_completion(
+            client,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"OCR output:\n{corrected_ocr_text}"},
