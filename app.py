@@ -181,17 +181,56 @@ def _openrouter_client():
     return OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
 
 
-def _openrouter_chat_completion(client, **kwargs):
-    """Try each model in OPENROUTER_FALLBACK_MODELS in order, returning the
-    first successful response. Free-tier upstream providers rate-limit
-    independently per model, so passing a 'models' fallback list to
-    OpenRouter's API doesn't help when 'model' is also set -- 'model' wins
-    and the list is ignored. Doing the fallback here, one plain call per
-    model, sidesteps that ambiguity entirely."""
-    last_error = None
+# Local Ollama, tried before OpenRouter -- free, unlimited, no rate limits.
+# Ollama's OpenAI-compatible endpoint only exists on your own machine; on the
+# HF Space localhost:11434 refuses the connection immediately (short timeout
+# below keeps that fast), so it falls through to OpenRouter there with no env
+# toggle needed. OLLAMA_MODEL defaults to llama3.1:8b -- the only
+# general-purpose instruct model in this project's local Ollama pull (the
+# *-coder models are code-specialized and unsuited to prose correction).
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.1:8b")
+
+
+def _try_chat_completion(client, model_name, **kwargs):
+    """One plain chat-completion call. Raises if the call errors OR if it
+    "succeeds" with empty content -- a reasoning model (e.g. tencent/hy3) can
+    return HTTP 200 with choices[0].message.content == None after burning the
+    whole max_tokens budget on internal chain-of-thought, which isn't an
+    exception but must still be treated as a failure or callers crash doing
+    llm_output.strip() on None."""
+    response = client.chat.completions.create(model=model_name, **kwargs)
+    if not response.choices[0].message.content:
+        raise ValueError(f"{model_name} returned empty content (finish_reason={response.choices[0].finish_reason})")
+    return response
+
+
+def _llm_chat_completion(**kwargs):
+    """Try local Ollama first, then each model in OPENROUTER_FALLBACK_MODELS
+    in order, returning the first response that actually contains text.
+    Free-tier upstream providers rate-limit independently per model, so
+    passing a 'models' fallback list to OpenRouter's API doesn't help when
+    'model' is also set -- 'model' wins and the list is ignored. Doing the
+    fallback here, one plain call per model, sidesteps that ambiguity
+    entirely."""
+    try:
+        # 5s was too aggressive: a real (reachable) Ollama server generating
+        # up to max_tokens=300 on CPU can legitimately take 10+ seconds, and
+        # that was timing out and falling through to OpenRouter before
+        # Ollama ever got to answer. An unreachable Ollama (e.g. the HF
+        # Space, which has none) still fails in well under a second via
+        # connection-refused, so a longer timeout only matters for the
+        # "reachable but slow" case it was wrongly cutting off.
+        ollama_client = OpenAI(base_url=OLLAMA_BASE_URL, api_key="ollama", timeout=60.0, max_retries=0)
+        return _try_chat_completion(ollama_client, OLLAMA_MODEL, **kwargs)
+    except Exception as e:
+        print(f"Local Ollama ({OLLAMA_MODEL}) unavailable, falling back to OpenRouter: {e}")
+
+    openrouter_client = _openrouter_client()
+    last_error = RuntimeError("OPENROUTER_FALLBACK_MODELS is empty")
     for model_name in OPENROUTER_FALLBACK_MODELS:
         try:
-            return client.chat.completions.create(model=model_name, **kwargs)
+            return _try_chat_completion(openrouter_client, model_name, **kwargs)
         except Exception as e:
             print(f"OpenRouter model {model_name} failed, trying next: {e}")
             last_error = e
@@ -555,7 +594,6 @@ def graphology_read(image):
         return "⚠️ OPENROUTER_API_KEY not found.\nAdd it under Settings → Repository secrets in your HF Space."
 
     features = compute_handwriting_features(image)
-    client = _openrouter_client()
     prompt = (
         f"Measured handwriting stats: slant={features['slant_deg']} degrees, "
         f"ink density={features['ink_density']}, line-height variance={features['height_variance']}.\n"
@@ -564,8 +602,7 @@ def graphology_read(image):
         "Be creative and complimentary, not clinical."
     )
     try:
-        response = _openrouter_chat_completion(
-            client,
+        response = _llm_chat_completion(
             messages=[
                 {"role": "system", "content": "You write short, fun, lighthearted handwriting personality reads. Never claim scientific validity."},
                 {"role": "user", "content": prompt},
@@ -575,7 +612,7 @@ def graphology_read(image):
         )
         blurb = response.choices[0].message.content
     except Exception as e:
-        return f"⚠️ OpenRouter API error: {e}"
+        return f"⚠️ LLM correction API error: {e}"
 
     return (
         "### 🖋️ Handwriting Personality Read\n"
@@ -594,10 +631,8 @@ def pen_pal_reply(ocr_text):
     if not OPENROUTER_API_KEY:
         return "⚠️ OPENROUTER_API_KEY not found.\nAdd it under Settings → Repository secrets in your HF Space."
 
-    client = _openrouter_client()
     try:
-        response = _openrouter_chat_completion(
-            client,
+        response = _llm_chat_completion(
             messages=[
                 {"role": "system", "content": (
                     "You are a pen pal replying to a handwritten letter, matching its "
@@ -612,7 +647,7 @@ def pen_pal_reply(ocr_text):
         )
         reply = response.choices[0].message.content
     except Exception as e:
-        return f"⚠️ OpenRouter API error: {e}"
+        return f"⚠️ LLM correction API error: {e}"
 
     return f"### ✉️ Reply from a Pen Pal\n\n{reply}"
 
@@ -704,11 +739,8 @@ def explain(ocr_text, confidence_md=""):
             "output shows the same error):\n" + examples_block
         )
 
-    client = _openrouter_client()
-
     try:
-        response = _openrouter_chat_completion(
-            client,
+        response = _llm_chat_completion(
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"OCR output:\n{corrected_ocr_text}"},
@@ -718,8 +750,12 @@ def explain(ocr_text, confidence_md=""):
         )
         llm_output = response.choices[0].message.content
     except Exception as e:
-        print(f"OpenRouter API error in explain(): {e}")
-        return f"⚠️ OpenRouter API error: {e}"
+        print(f"LLM correction API error in explain(): {e}")
+        return f"⚠️ LLM correction API error: {e}"
+
+    if not llm_output:
+        print("LLM correction API error in explain(): all backends returned empty content")
+        return "⚠️ LLM correction API error: model(s) returned no content"
 
     # --- Parse structured fields from LLM response ---
     lines = llm_output.strip().split("\n")
@@ -761,7 +797,12 @@ def explain(ocr_text, confidence_md=""):
             unmatched_tokens.append(ct)
 
     overridden = False
-    if len(unmatched_tokens) > 0 and "HIGH" in confidence:
+    # The system prompt tells the model "if Added content = YES, Confidence
+    # cannot be HIGH" (rule 3), but smaller/local models (e.g. llama3.1:8b via
+    # Ollama) don't reliably obey their own stated rules the way the larger
+    # cloud models this prompt was tuned against do -- enforce it here rather
+    # than trusting self-reported consistency.
+    if (len(unmatched_tokens) > 0 or added_content.strip().upper() == "YES") and "HIGH" in confidence:
         # Override: downgrade to MEDIUM, strip Context, force disclaimer
         confidence = "MEDIUM"
         context = []
