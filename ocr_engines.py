@@ -1,11 +1,19 @@
 """Comparison OCR engines (Tesseract, EasyOCR) for benchmarking against
 TrOCR, both on the bundled ground-truth set and on logged corrections."""
+import os
+import platform
 import threading
 
 import pytesseract
 from PIL import Image
 
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+if platform.system() == "Windows":
+    # Local dev only -- the tesseract-ocr apt package (installed via
+    # packages.txt on HF Spaces / other Linux hosts) puts the binary on
+    # PATH, so pytesseract's default lookup already finds it there.
+    _WINDOWS_TESSERACT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+    if os.path.exists(_WINDOWS_TESSERACT):
+        pytesseract.pytesseract.tesseract_cmd = _WINDOWS_TESSERACT
 
 _easyocr_reader = None
 _easyocr_reader_lock = threading.Lock()
