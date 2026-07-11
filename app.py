@@ -161,10 +161,19 @@ OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct:free"
 # Free-tier upstream providers get congested independently of each other, so
 # list alternates here -- OpenRouter tries each in order and only moves to
 # the next if the previous one is unavailable/rate-limited.
+#
+# NOTE: OpenRouter periodically retires ":free" slugs to paid-only (the API
+# returns a 404 naming the paid replacement, not a 429). The entries below
+# were dropped for that exact reason on 2026-07-11 --
+# deepseek/deepseek-chat-v3-0324:free and qwen/qwen-2.5-72b-instruct:free.
+# Verify a candidate is still free at https://openrouter.ai/models?max_price=0
+# before adding it back, rather than re-adding by name from memory.
 OPENROUTER_FALLBACK_MODELS = [
     OPENROUTER_MODEL,
-    "deepseek/deepseek-chat-v3-0324:free",
-    "qwen/qwen-2.5-72b-instruct:free",
+    # tencent/hy3:free -- per its OpenRouter listing (checked 2026-07-11) this
+    # model is scheduled to be retired/go paid on 2026-07-21. Re-verify at
+    # https://openrouter.ai/models?max_price=0 after that date.
+    "tencent/hy3:free",
 ]
 
 
