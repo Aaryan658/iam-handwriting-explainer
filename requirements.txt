@@ -2,7 +2,7 @@ gradio
 transformers
 torch
 pillow
-groq
+openai
 sentencepiece
 tiktoken
 protobuf

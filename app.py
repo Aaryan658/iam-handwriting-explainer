@@ -19,7 +19,7 @@ import gradio as gr
 import torch
 import numpy as np
 from PIL import Image
-from groq import Groq
+from openai import OpenAI
 import re
 from segmentation import segment_lines
 import ocr_engines
@@ -142,17 +142,25 @@ warnings.filterwarnings("ignore")
 # ---------------------------------------------------------------------------
 # Secrets — read from HF Spaces or local .env file
 # ---------------------------------------------------------------------------
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
-if not GROQ_API_KEY and os.path.exists(".env"):
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+if not OPENROUTER_API_KEY and os.path.exists(".env"):
     try:
         with open(".env", "r", encoding="utf-8") as f:
             for line in f:
-                if line.strip().startswith("GROQ_API_KEY="):
-                    GROQ_API_KEY = line.split("=", 1)[1].strip().strip('"').strip("'")
-                    os.environ["GROQ_API_KEY"] = GROQ_API_KEY
+                if line.strip().startswith("OPENROUTER_API_KEY="):
+                    OPENROUTER_API_KEY = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    os.environ["OPENROUTER_API_KEY"] = OPENROUTER_API_KEY
                     break
     except Exception:
         pass
+
+# Free-tier model on OpenRouter -- separate quota from Groq's, used as the
+# LLM correction/explanation backend instead of Groq's API.
+OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct:free"
+
+
+def _openrouter_client():
+    return OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
 
 # ---------------------------------------------------------------------------
 # TrOCR model loading
@@ -508,11 +516,11 @@ def graphology_read(image):
     in real computed slant/density/spacing stats -- not a scientific claim."""
     if image is None:
         return "⚠️ Please select or upload an image first."
-    if not GROQ_API_KEY:
-        return "⚠️ GROQ_API_KEY not found.\nAdd it under Settings → Repository secrets in your HF Space."
+    if not OPENROUTER_API_KEY:
+        return "⚠️ OPENROUTER_API_KEY not found.\nAdd it under Settings → Repository secrets in your HF Space."
 
     features = compute_handwriting_features(image)
-    client = Groq(api_key=GROQ_API_KEY)
+    client = _openrouter_client()
     prompt = (
         f"Measured handwriting stats: slant={features['slant_deg']} degrees, "
         f"ink density={features['ink_density']}, line-height variance={features['height_variance']}.\n"
@@ -522,7 +530,7 @@ def graphology_read(image):
     )
     try:
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=OPENROUTER_MODEL,
             messages=[
                 {"role": "system", "content": "You write short, fun, lighthearted handwriting personality reads. Never claim scientific validity."},
                 {"role": "user", "content": prompt},
@@ -532,7 +540,7 @@ def graphology_read(image):
         )
         blurb = response.choices[0].message.content
     except Exception as e:
-        return f"⚠️ Groq API error: {e}"
+        return f"⚠️ OpenRouter API error: {e}"
 
     return (
         "### 🖋️ Handwriting Personality Read\n"
@@ -548,13 +556,13 @@ def pen_pal_reply(ocr_text):
     transcribed letter, as if a contemporary pen pal were responding."""
     if not ocr_text or ocr_text.startswith("⚠️"):
         return "⚠️ Nothing to reply to — run Transcribe first."
-    if not GROQ_API_KEY:
-        return "⚠️ GROQ_API_KEY not found.\nAdd it under Settings → Repository secrets in your HF Space."
+    if not OPENROUTER_API_KEY:
+        return "⚠️ OPENROUTER_API_KEY not found.\nAdd it under Settings → Repository secrets in your HF Space."
 
-    client = Groq(api_key=GROQ_API_KEY)
+    client = _openrouter_client()
     try:
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=OPENROUTER_MODEL,
             messages=[
                 {"role": "system", "content": (
                     "You are a pen pal replying to a handwritten letter, matching its "
@@ -569,7 +577,7 @@ def pen_pal_reply(ocr_text):
         )
         reply = response.choices[0].message.content
     except Exception as e:
-        return f"⚠️ Groq API error: {e}"
+        return f"⚠️ OpenRouter API error: {e}"
 
     return f"### ✉️ Reply from a Pen Pal\n\n{reply}"
 
@@ -603,9 +611,9 @@ def explain(ocr_text, confidence_md=""):
     """Send transcription to Groq, run token-overlap check, return formatted output."""
     if not ocr_text or ocr_text.startswith("⚠️"):
         return "⚠️ Nothing to explain — run Transcribe first."
-    if not GROQ_API_KEY:
+    if not OPENROUTER_API_KEY:
         return (
-            "⚠️ GROQ_API_KEY not found.\n"
+            "⚠️ OPENROUTER_API_KEY not found.\n"
             "Add it under Settings → Repository secrets in your HF Space."
         )
 
@@ -661,11 +669,11 @@ def explain(ocr_text, confidence_md=""):
             "output shows the same error):\n" + examples_block
         )
 
-    client = Groq(api_key=GROQ_API_KEY)
+    client = _openrouter_client()
 
     try:
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=OPENROUTER_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"OCR output:\n{corrected_ocr_text}"},
@@ -675,8 +683,8 @@ def explain(ocr_text, confidence_md=""):
         )
         llm_output = response.choices[0].message.content
     except Exception as e:
-        print(f"Groq API error in explain(): {e}")
-        return f"⚠️ Groq API error: {e}"
+        print(f"OpenRouter API error in explain(): {e}")
+        return f"⚠️ OpenRouter API error: {e}"
 
     # --- Parse structured fields from LLM response ---
     lines = llm_output.strip().split("\n")
@@ -1458,7 +1466,7 @@ def build_ui():
         gr.Markdown(
             "<div style='text-align:center; color:#9ca3af; font-size:0.8rem; "
             "margin-top:1.5rem;'>"
-            "Powered by TrOCR · Groq (Llama 3.3) · Gradio  ·  "
+            "Powered by TrOCR · OpenRouter (Llama 3.3) · Gradio  ·  "
             "Samples from <a href='https://huggingface.co/datasets/Teklia/IAM-line' "
             "style='color:#667eea;'>Teklia/IAM-line</a>"
             "</div>"
