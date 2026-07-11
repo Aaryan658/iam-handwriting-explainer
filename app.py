@@ -158,6 +158,15 @@ if not OPENROUTER_API_KEY and os.path.exists(".env"):
 # LLM correction/explanation backend instead of Groq's API.
 OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct:free"
 
+# Free-tier upstream providers get congested independently of each other, so
+# list alternates here -- OpenRouter tries each in order and only moves to
+# the next if the previous one is unavailable/rate-limited.
+OPENROUTER_FALLBACK_MODELS = [
+    OPENROUTER_MODEL,
+    "deepseek/deepseek-chat-v3-0324:free",
+    "qwen/qwen-2.5-72b-instruct:free",
+]
+
 
 def _openrouter_client():
     return OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
@@ -531,6 +540,7 @@ def graphology_read(image):
     try:
         response = client.chat.completions.create(
             model=OPENROUTER_MODEL,
+            extra_body={"models": OPENROUTER_FALLBACK_MODELS},
             messages=[
                 {"role": "system", "content": "You write short, fun, lighthearted handwriting personality reads. Never claim scientific validity."},
                 {"role": "user", "content": prompt},
@@ -563,6 +573,7 @@ def pen_pal_reply(ocr_text):
     try:
         response = client.chat.completions.create(
             model=OPENROUTER_MODEL,
+            extra_body={"models": OPENROUTER_FALLBACK_MODELS},
             messages=[
                 {"role": "system", "content": (
                     "You are a pen pal replying to a handwritten letter, matching its "
@@ -674,6 +685,7 @@ def explain(ocr_text, confidence_md=""):
     try:
         response = client.chat.completions.create(
             model=OPENROUTER_MODEL,
+            extra_body={"models": OPENROUTER_FALLBACK_MODELS},
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"OCR output:\n{corrected_ocr_text}"},
