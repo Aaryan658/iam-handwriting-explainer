@@ -1122,14 +1122,26 @@ tr:hover td {
 # ---------------------------------------------------------------------------
 import performance_metrics as _perf
 
+
+def _aggregate(rows, field):
+    return sum(r[field] for r in rows) / len(rows)
+
+
 try:
     _GROUND_TRUTH = _perf.load_ground_truth(os.path.join(SAMPLES_DIR, "ground_truth.csv"))
-    _COMPARISON_ROWS = _perf.evaluate_stock_vs_pipeline(_GROUND_TRUTH)
-    _AGGREGATE_CER = sum(r["pipeline_cer"] for r in _COMPARISON_ROWS) / len(_COMPARISON_ROWS)
-    _AGGREGATE_WER = sum(r["pipeline_wer"] for r in _COMPARISON_ROWS) / len(_COMPARISON_ROWS)
+    _COMPARISON_ROWS = _perf.evaluate_all_engines(_GROUND_TRUTH)
+    _BUNDLED_METRICS = {
+        "Stock TrOCR": (_aggregate(_COMPARISON_ROWS, "stock_wer"), _aggregate(_COMPARISON_ROWS, "stock_cer")),
+        "TrOCR + Groq (Pipeline)": (_aggregate(_COMPARISON_ROWS, "pipeline_wer"), _aggregate(_COMPARISON_ROWS, "pipeline_cer")),
+        "Tesseract": (_aggregate(_COMPARISON_ROWS, "tesseract_wer"), _aggregate(_COMPARISON_ROWS, "tesseract_cer")),
+        "EasyOCR": (_aggregate(_COMPARISON_ROWS, "easyocr_wer"), _aggregate(_COMPARISON_ROWS, "easyocr_cer")),
+    }
+    _AGGREGATE_CER = _BUNDLED_METRICS["TrOCR + Groq (Pipeline)"][1]
+    _AGGREGATE_WER = _BUNDLED_METRICS["TrOCR + Groq (Pipeline)"][0]
 except Exception as e:
     print(f"Performance metrics computation failed at startup: {e}")
     _COMPARISON_ROWS = []
+    _BUNDLED_METRICS = {}
     _AGGREGATE_CER = _AGGREGATE_WER = 0.0
 
 
@@ -1356,17 +1368,17 @@ def build_ui():
                     with gr.Column(scale=1):
                         gr.Markdown(
                             "### 📈 Batch Evaluation Metrics (8 Bundled Samples)\n"
-                            "This table shows TrOCR + Groq pipeline performance metrics computed live at startup "
-                            "against the 8 bundled ground-truth samples from the `Teklia/IAM-line` dataset."
+                            "This table shows TrOCR, TrOCR+Groq, Tesseract, and EasyOCR performance metrics "
+                            "computed live at startup against the 8 bundled ground-truth samples from the "
+                            "`Teklia/IAM-line` dataset."
                         )
-                        gr.Markdown(
-                            "| Metric | Value |\n"
-                            "| :--- | :--- |\n"
-                            f"| **Word Error Rate (WER)** | **{_AGGREGATE_WER * 100:.2f}%** |\n"
-                            f"| **Character Error Rate (CER)** | **{_AGGREGATE_CER * 100:.2f}%** |\n"
-                            f"| **Overall Word Accuracy** | **{(1 - _AGGREGATE_WER) * 100:.2f}%** |\n"
-                            f"| **Overall Character Accuracy** | **{(1 - _AGGREGATE_CER) * 100:.2f}%** |"
-                        )
+                        _bundled_metric_lines = [
+                            "| Engine | WER | CER |",
+                            "| :--- | :---: | :---: |",
+                        ]
+                        for _engine_label, (_wer, _cer) in _BUNDLED_METRICS.items():
+                            _bundled_metric_lines.append(f"| **{_engine_label}** | **{_wer*100:.2f}%** | **{_cer*100:.2f}%** |")
+                        gr.Markdown("\n".join(_bundled_metric_lines))
                         
                         gr.Markdown(
                             "### 🧠 Why TrOCR Was Chosen Over Florence-2\n"
@@ -1391,18 +1403,21 @@ def build_ui():
                 
                 gr.Markdown("<hr>")
                 gr.Markdown(
-                    "### 👥 Stock TrOCR vs Full Pipeline (8-Sample Set)\n"
+                    "### 👥 Stock TrOCR vs Full Pipeline vs Tesseract vs EasyOCR (8-Sample Set)\n"
                     "A sample-by-sample comparison of raw TrOCR output against the full pipeline "
-                    "(TrOCR followed by Groq correction), computed live at startup against the bundled ground truth."
+                    "(TrOCR followed by Groq correction), Tesseract, and EasyOCR, computed live at startup "
+                    "against the bundled ground truth."
                 )
                 _comparison_lines = [
-                    "| Sample | Ground Truth | Stock TrOCR | Stock CER | Pipeline (TrOCR+Groq) | Pipeline CER |",
-                    "| :--- | :--- | :--- | :---: | :--- | :---: |",
+                    "| Sample | Ground Truth | Stock TrOCR | Stock CER | Pipeline (TrOCR+Groq) | Pipeline CER | Tesseract | Tesseract CER | EasyOCR | EasyOCR CER |",
+                    "| :--- | :--- | :--- | :---: | :--- | :---: | :--- | :---: | :--- | :---: |",
                 ]
                 for r in _COMPARISON_ROWS:
                     _comparison_lines.append(
                         f"| {r['image_path']} | {r['reference']} | {r['stock_output']} | "
-                        f"{r['stock_cer']*100:.2f}% | {r['pipeline_output']} | {r['pipeline_cer']*100:.2f}% |"
+                        f"{r['stock_cer']*100:.2f}% | {r['pipeline_output']} | {r['pipeline_cer']*100:.2f}% | "
+                        f"{r['tesseract_output']} | {r['tesseract_cer']*100:.2f}% | "
+                        f"{r['easyocr_output']} | {r['easyocr_cer']*100:.2f}% |"
                     )
                 gr.Markdown("\n".join(_comparison_lines))
 
