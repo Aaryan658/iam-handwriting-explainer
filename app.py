@@ -413,6 +413,111 @@ def log_correction(image_label, image_path, trocr_text, groq_explanation, user_c
     return build_corrections_dashboard()
 
 
+def compute_handwriting_features(image):
+    """Compute a few real, simple visual stats from the ink strokes -- slant
+    angle, ink density, line-height variance -- to ground the playful
+    'graphology' read in actual measurements rather than pure LLM fabrication."""
+    import cv2
+    if isinstance(image, str):
+        pil_image = Image.open(image).convert("L")
+    elif isinstance(image, Image.Image):
+        pil_image = image.convert("L")
+    else:
+        pil_image = Image.fromarray(image).convert("L")
+
+    gray = np.array(pil_image)
+    ink_mask = (gray < 128).astype(np.uint8) * 255
+    ink_density = float(ink_mask.mean() / 255.0)
+
+    coords = np.column_stack(np.where(ink_mask > 0))
+    if len(coords) >= 10:
+        angle = cv2.minAreaRect(coords)[-1]
+        angle = -(90 + angle) if angle < -45 else -angle
+    else:
+        angle = 0.0
+
+    row_sums = ink_mask.sum(axis=1)
+    ink_rows = np.where(row_sums > 0)[0]
+    height_variance = float(np.std(ink_rows)) if len(ink_rows) > 1 else 0.0
+
+    return {
+        "slant_deg": round(float(angle), 1),
+        "ink_density": round(ink_density, 3),
+        "height_variance": round(height_variance, 1),
+    }
+
+
+def graphology_read(image):
+    """Playful, clearly-labeled-as-entertainment 'personality read' grounded
+    in real computed slant/density/spacing stats -- not a scientific claim."""
+    if image is None:
+        return "⚠️ Please select or upload an image first."
+    if not GROQ_API_KEY:
+        return "⚠️ GROQ_API_KEY not found.\nAdd it under Settings → Repository secrets in your HF Space."
+
+    features = compute_handwriting_features(image)
+    client = Groq(api_key=GROQ_API_KEY)
+    prompt = (
+        f"Measured handwriting stats: slant={features['slant_deg']} degrees, "
+        f"ink density={features['ink_density']}, line-height variance={features['height_variance']}.\n"
+        "Write a short, playful, upbeat 'handwriting personality read' (3-4 sentences) "
+        "based on these stats, in the style of a fun graphology app. "
+        "Be creative and complimentary, not clinical."
+    )
+    try:
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": "You write short, fun, lighthearted handwriting personality reads. Never claim scientific validity."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.9,
+            max_tokens=200,
+        )
+        blurb = response.choices[0].message.content
+    except Exception as e:
+        return f"⚠️ Groq API error: {e}"
+
+    return (
+        "### 🖋️ Handwriting Personality Read\n"
+        "_For fun only — not a scientific assessment._\n\n"
+        f"{blurb}\n\n"
+        f"<sub>Measured: slant {features['slant_deg']}°, ink density {features['ink_density']}, "
+        f"line variance {features['height_variance']}</sub>"
+    )
+
+
+def pen_pal_reply(ocr_text):
+    """Have Groq write an in-character, period-appropriate reply to the
+    transcribed letter, as if a contemporary pen pal were responding."""
+    if not ocr_text or ocr_text.startswith("⚠️"):
+        return "⚠️ Nothing to reply to — run Transcribe first."
+    if not GROQ_API_KEY:
+        return "⚠️ GROQ_API_KEY not found.\nAdd it under Settings → Repository secrets in your HF Space."
+
+    client = Groq(api_key=GROQ_API_KEY)
+    try:
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": (
+                    "You are a pen pal replying to a handwritten letter, matching its "
+                    "apparent time period, register, and tone. Write a short, warm, "
+                    "in-character reply (4-6 sentences). Do not break character or "
+                    "mention that you are an AI."
+                )},
+                {"role": "user", "content": f"Letter received:\n{ocr_text}"},
+            ],
+            temperature=0.8,
+            max_tokens=300,
+        )
+        reply = response.choices[0].message.content
+    except Exception as e:
+        return f"⚠️ Groq API error: {e}"
+
+    return f"### ✉️ Reply from a Pen Pal\n\n{reply}"
+
+
 DEFAULT_EXPLANATION = "### LLM Correction + Confidence\n_Run Transcribe and Explain to see results here._"
 
 def reset_explanation():
@@ -1068,14 +1173,19 @@ def build_ui():
                             value="### LLM Correction + Confidence\n_Run Transcribe and Explain to see results here._",
                             elem_classes=["output-box", "markdown-box"],
                         )
+                        with gr.Row():
+                            sample_graphology_btn = gr.Button("🖋️ Personality Read", elem_classes=["explain-btn"])
+                            sample_penpal_btn = gr.Button("✉️ Reply as Pen Pal", elem_classes=["explain-btn"])
+                        sample_graphology_output = gr.Markdown(value="", elem_classes=["output-box", "markdown-box"])
+                        sample_penpal_output = gr.Markdown(value="", elem_classes=["output-box", "markdown-box"])
 
                 def clear_sample_outputs():
-                    return "", "", "", DEFAULT_EXPLANATION
+                    return "", "", "", DEFAULT_EXPLANATION, "", ""
 
                 sample_image.change(
                     fn=clear_sample_outputs,
                     inputs=[],
-                    outputs=[sample_transcription, sample_confidence, sample_verify, sample_explanation],
+                    outputs=[sample_transcription, sample_confidence, sample_verify, sample_explanation, sample_graphology_output, sample_penpal_output],
                 )
                 sample_transcribe_btn.click(
                     fn=transcribe_sample_and_reset,
@@ -1095,6 +1205,16 @@ def build_ui():
                     fn=log_correction,
                     inputs=[sample_dropdown, sample_image, sample_transcription, sample_explanation, sample_verify],
                     outputs=[corrections_dashboard_display]
+                )
+                sample_graphology_btn.click(
+                    fn=graphology_read,
+                    inputs=[sample_image],
+                    outputs=[sample_graphology_output],
+                )
+                sample_penpal_btn.click(
+                    fn=pen_pal_reply,
+                    inputs=[sample_transcription],
+                    outputs=[sample_penpal_output],
                 )
 
             # ==============================================================
@@ -1143,14 +1263,19 @@ def build_ui():
                             value=DEFAULT_EXPLANATION,
                             elem_classes=["output-box", "markdown-box"],
                         )
+                        with gr.Row():
+                            upload_graphology_btn = gr.Button("🖋️ Personality Read", elem_classes=["explain-btn"])
+                            upload_penpal_btn = gr.Button("✉️ Reply as Pen Pal", elem_classes=["explain-btn"])
+                        upload_graphology_output = gr.Markdown(value="", elem_classes=["output-box", "markdown-box"])
+                        upload_penpal_output = gr.Markdown(value="", elem_classes=["output-box", "markdown-box"])
 
                 def clear_upload_outputs():
-                    return "", "", "", DEFAULT_EXPLANATION
+                    return "", "", "", DEFAULT_EXPLANATION, "", ""
 
                 upload_image.change(
                     fn=clear_upload_outputs,
                     inputs=[],
-                    outputs=[upload_transcription, upload_confidence, upload_verify, upload_explanation],
+                    outputs=[upload_transcription, upload_confidence, upload_verify, upload_explanation, upload_graphology_output, upload_penpal_output],
                 )
                 upload_transcribe_btn.click(
                     fn=transcribe_upload_and_reset,
@@ -1170,6 +1295,16 @@ def build_ui():
                     fn=log_correction,
                     inputs=[upload_image, upload_image, upload_transcription, upload_explanation, upload_verify],
                     outputs=[corrections_dashboard_display]
+                )
+                upload_graphology_btn.click(
+                    fn=graphology_read,
+                    inputs=[upload_image],
+                    outputs=[upload_graphology_output],
+                )
+                upload_penpal_btn.click(
+                    fn=pen_pal_reply,
+                    inputs=[upload_transcription],
+                    outputs=[upload_penpal_output],
                 )
 
             # ==============================================================
